@@ -8,6 +8,7 @@ chacha20poly1305 = "0.10"
 argon2 = "0.5"
 rpassword = "7.0"
 rand = "0.8"
+uuid = { version = "1.19.0", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

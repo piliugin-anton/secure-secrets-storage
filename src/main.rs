@@ -97,6 +97,9 @@ fn main() -> io::Result<()> {
 
     let command = &args[1];
 
+    let vault_file = "vault.enc";
+    let audit_file = "audit.log";
+
     // Prompt passphrase securely (no echo)
     let passphrase = SecureString::new(prompt_password("Enter passphrase: ").unwrap());
 
@@ -106,29 +109,29 @@ fn main() -> io::Result<()> {
         .unwrap_or_else(|_| "unknown".to_string());
 
     // Load or create vault with file locking
-    let mut vault = match load_vault(&passphrase) {
+    let mut vault = match load_vault(vault_file, &passphrase) {
         Ok(v) => v,
         Err(e) if e.kind() == io::ErrorKind::InvalidData => {
             println!("Invalid passphrase or corrupted vault.");
             return Err(e);
         }
         Err(e) => return Err(e),
-    };
+    };    
 
     match command.as_str() {
         "add" if args.len() == 4 => {
             let key = args[2].clone();
             let value = SecureString::new(args[3].clone());
             vault.insert(key.clone(), value);
-            log_audit(&username, &format!("Added '{}'", key))?;
-            save_vault(&vault, &passphrase)?;
+            log_audit(audit_file, &username, &format!("Added '{}'", key))?;
+            save_vault(vault_file, audit_file, &vault, &passphrase)?;
             println!("Secret added successfully.");
         }
         "get" if args.len() == 3 => {
             let key = &args[2];
             if let Some(value) = vault.get(key) {
                 println!("{}", value.as_str());
-                log_audit(&username, &format!("Accessed '{}'", key))?;
+                log_audit(audit_file, &username, &format!("Accessed '{}'", key))?;
             } else {
                 println!("Key not found.");
             }
@@ -137,13 +140,13 @@ fn main() -> io::Result<()> {
             for key in vault.keys() {
                 println!("{}", key);
             }
-            log_audit(&username, "Listed keys")?;
+            log_audit(audit_file, &username, "Listed keys")?;
         }
         "delete" if args.len() == 3 => {
             let key = &args[2];
             if vault.remove(key).is_some() {
-                log_audit(&username, &format!("Deleted '{}'", key))?;
-                save_vault(&vault, &passphrase)?;
+                log_audit(audit_file, &username, &format!("Deleted '{}'", key))?;
+                save_vault(vault_file, audit_file, &vault, &passphrase)?;
                 println!("Secret deleted successfully.");
             } else {
                 println!("Key not found.");
@@ -162,13 +165,13 @@ fn main() -> io::Result<()> {
                 return Ok(());
             }
             
-            save_vault(&vault, &new_passphrase)?;
-            log_audit(&username, "Changed passphrase")?;
+            save_vault(vault_file, audit_file, &vault, &new_passphrase)?;
+            log_audit(audit_file, &username, "Changed passphrase")?;
             println!("Passphrase changed successfully.");
         }
         "audit" if args.len() == 2 => {
-            view_audit_log(&passphrase)?;
-            log_audit(&username, "Viewed audit log")?;
+            view_audit_log(audit_file, &passphrase)?;
+            log_audit(audit_file, &username, "Viewed audit log")?;
         }
         _ => {
             println!("Invalid command or arguments.");
@@ -224,8 +227,8 @@ fn lock_file_exclusive(file: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn load_vault(passphrase: &SecureString) -> io::Result<HashMap<String, SecureString>> {
-    let path = Path::new(get_vault_file());
+fn load_vault(vault_file: &str, passphrase: &SecureString) -> io::Result<HashMap<String, SecureString>> {
+    let path = Path::new(vault_file);
     if !path.exists() {
         return Ok(HashMap::new());
     }
@@ -289,7 +292,7 @@ fn load_vault(passphrase: &SecureString) -> io::Result<HashMap<String, SecureStr
     Ok(vault)
 }
 
-fn save_vault(vault: &HashMap<String, SecureString>, passphrase: &SecureString) -> io::Result<()> {
+fn save_vault(vault_file: &str, audit_file: &str, vault: &HashMap<String, SecureString>, passphrase: &SecureString) -> io::Result<()> {
     let mut data = String::new();
     for (k, v) in vault {
         if k.contains(':') || v.as_str().contains('\n') {
@@ -325,7 +328,7 @@ fn save_vault(vault: &HashMap<String, SecureString>, passphrase: &SecureString) 
     let hmac = compute_hmac(&auth_key, &salt, &nonce_bytes, &ciphertext)?;
 
     // Write to temporary file first, then atomic rename
-    let vault_file = get_vault_file();
+    //let vault_file = get_vault_file();
     let temp_file = format!("{}.tmp", vault_file);
     let is_new = !Path::new(vault_file).exists();
     
@@ -359,7 +362,7 @@ fn save_vault(vault: &HashMap<String, SecureString>, passphrase: &SecureString) 
     std::fs::rename(&temp_file, vault_file)?;
 
     if is_new {
-        log_audit("SYSTEM", "Vault created")?;
+        log_audit(audit_file, "SYSTEM", "Vault created")?;
     }
 
     Ok(())
@@ -426,11 +429,11 @@ fn verify_hmac(key: &SecureBytes, salt: &[u8], nonce: &[u8], ciphertext: &[u8], 
     Ok(())
 }
 
-fn log_audit(user: &str, message: &str) -> io::Result<()> {
+fn log_audit(audit_file: &str, user: &str, message: &str) -> io::Result<()> {
     let mut file = OpenOptions::new()
         .append(true)
         .create(true)
-        .open(get_audit_file())?;
+        .open(audit_file)?;
     
     lock_file_exclusive(&file)?;
     
@@ -452,11 +455,10 @@ fn log_audit(user: &str, message: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn view_audit_log(passphrase: &SecureString) -> io::Result<()> {
+fn view_audit_log(audit_file: &str, passphrase: &SecureString) -> io::Result<()> {
     // Verify passphrase is correct by attempting to load the vault
-    load_vault(passphrase)?;
+    load_vault(audit_file, passphrase)?;
     
-    let audit_file = get_audit_file();
     if Path::new(audit_file).exists() {
         let file = File::open(audit_file)?;
         let reader = BufReader::new(file);
@@ -475,18 +477,22 @@ mod tests {
     use std::fs;
 
     // Helper to create a test vault file path
-    fn test_vault_file() -> String {
-        format!("test_vault_{}.enc", std::process::id())
+    fn get_test_vault_file() -> String {
+        let random_uuid: uuid::Uuid = uuid::Uuid::new_v4();
+        format!("test_vault_{}.enc", random_uuid)
     }
 
-    fn test_audit_file() -> String {
-        format!("test_audit_{}.log", std::process::id())
+    fn get_test_audit_file() -> String {
+        let random_uuid: uuid::Uuid = uuid::Uuid::new_v4();
+        format!("test_audit_{}.log", random_uuid)
     }
 
     // Clean up test files
     fn cleanup_test_files(vault: &str, audit: &str) {
         let _ = fs::remove_file(vault);
-        let _ = fs::remove_file(audit);
+        if audit != "" {
+            let _ = fs::remove_file(audit);
+        }
     }
 
     #[test]
@@ -580,22 +586,23 @@ mod tests {
     #[test]
     fn test_empty_vault_load() {
         let passphrase = SecureString::new("test_password".to_string());
-        
+        let vault_file = get_test_vault_file();
         // Should return empty hashmap for non-existent vault
-        let vault = load_vault(&passphrase).unwrap();
+        let vault = load_vault(&vault_file, &passphrase).unwrap();
         assert_eq!(vault.len(), 0);
+        cleanup_test_files(&vault_file, "");
     }
 
     #[test]
     fn test_save_and_load_vault() {
-        let vault_file = test_vault_file();
-        let audit_file = test_audit_file();
+        let vault_file = get_test_vault_file();
+        let audit_file = get_test_audit_file();
         
-        // Temporarily override file paths for testing
+       /*  // Temporarily override file paths for testing
         unsafe {
             VAULT_FILE_OVERRIDE = Some(vault_file.clone());
             AUDIT_FILE_OVERRIDE = Some(audit_file.clone());
-        }
+        } */
         
         let passphrase = SecureString::new("test_password_123".to_string());
         let mut vault = HashMap::new();
@@ -603,31 +610,31 @@ mod tests {
         vault.insert("key2".to_string(), SecureString::new("value2".to_string()));
         
         // Save vault
-        save_vault(&vault, &passphrase).unwrap();
+        save_vault(&vault_file, &audit_file, &vault, &passphrase).unwrap();
         
         // Load vault
-        let loaded_vault = load_vault(&passphrase).unwrap();
+        let loaded_vault = load_vault(&vault_file, &passphrase).unwrap();
         
         assert_eq!(loaded_vault.len(), 2);
         assert_eq!(loaded_vault.get("key1").unwrap().as_str(), "value1");
         assert_eq!(loaded_vault.get("key2").unwrap().as_str(), "value2");
         
-        unsafe {
+        /* unsafe {
             VAULT_FILE_OVERRIDE = None;
             AUDIT_FILE_OVERRIDE = None;
-        }
+        } */
         cleanup_test_files(&vault_file, &audit_file);
     }
 
     #[test]
     fn test_wrong_passphrase() {
-        let vault_file = test_vault_file();
-        let audit_file = test_audit_file();
+        let vault_file = get_test_vault_file();
+        let audit_file = get_test_audit_file();
         
-        unsafe {
+       /*  unsafe {
             VAULT_FILE_OVERRIDE = Some(vault_file.clone());
             AUDIT_FILE_OVERRIDE = Some(audit_file.clone());
-        }
+        } */
         
         let correct_passphrase = SecureString::new("correct_password".to_string());
         let wrong_passphrase = SecureString::new("wrong_password".to_string());
@@ -635,40 +642,40 @@ mod tests {
         let mut vault = HashMap::new();
         vault.insert("secret".to_string(), SecureString::new("data".to_string()));
         
-        save_vault(&vault, &correct_passphrase).unwrap();
+        save_vault(&vault_file, &audit_file, &vault, &correct_passphrase).unwrap();
         
         // Try to load with wrong passphrase
-        let result = load_vault(&wrong_passphrase);
+        let result = load_vault(&vault_file, &wrong_passphrase);
         assert!(result.is_err());
         
-        unsafe {
+       /*  unsafe {
             VAULT_FILE_OVERRIDE = None;
             AUDIT_FILE_OVERRIDE = None;
-        }
+        } */
         cleanup_test_files(&vault_file, &audit_file);
     }
 
     #[test]
     fn test_salt_changes_on_save() {
-        let vault_file = test_vault_file();
-        let audit_file = test_audit_file();
+        let vault_file = get_test_vault_file();
+        let audit_file = get_test_audit_file();
         
-        unsafe {
+       /*  unsafe {
             VAULT_FILE_OVERRIDE = Some(vault_file.clone());
             AUDIT_FILE_OVERRIDE = Some(audit_file.clone());
-        }
+        } */
         
         let passphrase = SecureString::new("test_password".to_string());
         let mut vault = HashMap::new();
         vault.insert("key".to_string(), SecureString::new("value".to_string()));
         
         // Save twice
-        save_vault(&vault, &passphrase).unwrap();
+        save_vault(&vault_file, &audit_file, &vault, &passphrase).unwrap();
         let mut file1 = File::open(&vault_file).unwrap();
         let mut salt1 = vec![0u8; SALT_SIZE + 1]; // +1 for version byte
         file1.read_exact(&mut salt1).unwrap();
         
-        save_vault(&vault, &passphrase).unwrap();
+        save_vault(&vault_file, &audit_file, &vault, &passphrase).unwrap();
         let mut file2 = File::open(&vault_file).unwrap();
         let mut salt2 = vec![0u8; SALT_SIZE + 1];
         file2.read_exact(&mut salt2).unwrap();
@@ -676,22 +683,22 @@ mod tests {
         // Salts should be different (fresh salt on each save)
         assert_ne!(salt1, salt2);
         
-        unsafe {
+       /*  unsafe {
             VAULT_FILE_OVERRIDE = None;
             AUDIT_FILE_OVERRIDE = None;
-        }
+        } */
         cleanup_test_files(&vault_file, &audit_file);
     }
 
     #[test]
     fn test_passphrase_change() {
-        let vault_file = test_vault_file();
-        let audit_file = test_audit_file();
+        let vault_file = get_test_vault_file();
+        let audit_file = get_test_audit_file();
         
-        unsafe {
+       /*  unsafe {
             VAULT_FILE_OVERRIDE = Some(vault_file.clone());
             AUDIT_FILE_OVERRIDE = Some(audit_file.clone());
-        }
+        } */
         
         let old_passphrase = SecureString::new("old_password".to_string());
         let new_passphrase = SecureString::new("new_password".to_string());
@@ -700,40 +707,40 @@ mod tests {
         vault.insert("secret".to_string(), SecureString::new("important_data".to_string()));
         
         // Save with old passphrase
-        save_vault(&vault, &old_passphrase).unwrap();
+        save_vault(&vault_file, &audit_file, &vault, &old_passphrase).unwrap();
         
         // Re-encrypt with new passphrase
-        save_vault(&vault, &new_passphrase).unwrap();
+        save_vault(&vault_file, &audit_file, &vault, &new_passphrase).unwrap();
         
         // Should not load with old passphrase
-        assert!(load_vault(&old_passphrase).is_err());
+        assert!(load_vault(&vault_file, &old_passphrase).is_err());
         
         // Should load with new passphrase
-        let loaded = load_vault(&new_passphrase).unwrap();
+        let loaded = load_vault(&vault_file, &new_passphrase).unwrap();
         assert_eq!(loaded.get("secret").unwrap().as_str(), "important_data");
         
-        unsafe {
+       /*  unsafe {
             VAULT_FILE_OVERRIDE = None;
             AUDIT_FILE_OVERRIDE = None;
-        }
+        } */
         cleanup_test_files(&vault_file, &audit_file);
     }
 
     #[test]
     fn test_tampering_detection() {
-        let vault_file = test_vault_file();
-        let audit_file = test_audit_file();
+        let vault_file = get_test_vault_file();
+        let audit_file = get_test_audit_file();
         
-        unsafe {
+       /*  unsafe {
             VAULT_FILE_OVERRIDE = Some(vault_file.clone());
             AUDIT_FILE_OVERRIDE = Some(audit_file.clone());
-        }
+        } */
         
         let passphrase = SecureString::new("test_password".to_string());
         let mut vault = HashMap::new();
         vault.insert("key".to_string(), SecureString::new("value".to_string()));
         
-        save_vault(&vault, &passphrase).unwrap();
+        save_vault(&vault_file, &audit_file, &vault, &passphrase).unwrap();
         
         // Tamper with the file
         let mut file = OpenOptions::new()
@@ -747,49 +754,49 @@ mod tests {
         file.write_all(&[0xFF]).unwrap();
         
         // Should fail to load due to authentication failure
-        let result = load_vault(&passphrase);
+        let result = load_vault(&vault_file, &passphrase);
         assert!(result.is_err());
         
-        unsafe {
+       /*  unsafe {
             VAULT_FILE_OVERRIDE = None;
             AUDIT_FILE_OVERRIDE = None;
-        }
+        } */
         cleanup_test_files(&vault_file, &audit_file);
     }
 
     #[test]
     fn test_invalid_key_value_format() {
-        let vault_file = test_vault_file();
-        let audit_file = test_audit_file();
+        let vault_file = get_test_vault_file();
+        let audit_file = get_test_audit_file();
         
-        unsafe {
+       /*  unsafe {
             VAULT_FILE_OVERRIDE = Some(vault_file.clone());
             AUDIT_FILE_OVERRIDE = Some(audit_file.clone());
-        }
+        } */
         
         let passphrase = SecureString::new("test_password".to_string());
         let mut vault = HashMap::new();
         
         // Key with colon should fail
         vault.insert("key:with:colon".to_string(), SecureString::new("value".to_string()));
-        let result = save_vault(&vault, &passphrase);
+        let result = save_vault(&vault_file, &audit_file, &vault, &passphrase);
         assert!(result.is_err());
         
         vault.clear();
         
         // Value with newline should fail
         vault.insert("key".to_string(), SecureString::new("value\nwith\nnewlines".to_string()));
-        let result = save_vault(&vault, &passphrase);
+        let result = save_vault(&vault_file, &audit_file, &vault, &passphrase);
         assert!(result.is_err());
         
-        unsafe {
+       /*  unsafe {
             VAULT_FILE_OVERRIDE = None;
             AUDIT_FILE_OVERRIDE = None;
-        }
+        } */
         cleanup_test_files(&vault_file, &audit_file);
     }
 }
-
+/* 
 // Test helpers - allow overriding file paths
 static mut VAULT_FILE_OVERRIDE: Option<String> = None;
 static mut AUDIT_FILE_OVERRIDE: Option<String> = None;
@@ -813,4 +820,4 @@ fn get_audit_file() -> &'static str {
             AUDIT_FILE
         }
     }
-}
+} */
