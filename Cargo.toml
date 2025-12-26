@@ -9,6 +9,11 @@ argon2 = "0.5"
 rpassword = "7.0"
 rand = "0.8"
 uuid = { version = "1.19.0", features = ["v4"] }
+hkdf = "0.12.4"
+hmac = "0.12.1"
+sha2 = "0.10.9"
+zeroize = "1.8.2"
+chrono = "0.4.42"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
