@@ -1,0 +1,5 @@
+/target
+vault.enc
+audit.log
+test_vault_*.enc
+test_audit_*.log
