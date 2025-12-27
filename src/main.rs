@@ -448,7 +448,7 @@ fn save_vault(
     std::fs::rename(&temp_file, vault_file)?;
     
     // FIX 3: Update stored counter
-    write_stored_counter(vault_file, new_counter, &auth_key)?;
+    write_stored_counter(counter_file, new_counter, &auth_key)?;
 
     Ok(new_counter)
 }
@@ -551,7 +551,7 @@ fn load_vault(
     }
 
     // FIX 3: Update stored counter on successful load
-    write_stored_counter(vault_file, counter, &auth_key)?;
+    write_stored_counter(counter_file, counter, &auth_key)?;
 
     Ok((vault, loaded_counter))
 }
@@ -842,9 +842,10 @@ mod tests {
         )
     }
 
-    fn cleanup(vault: &str, audit: &str) {
+    fn cleanup(vault: &str, counter: &str,audit: &str) {
         let _ = fs::remove_file(vault);
         let _ = fs::remove_file(audit);
+        let _ = fs::remove_file(counter);
         let _ = fs::remove_file(format!("{}.tmp", vault));
         let _ = fs::remove_file(format!("{}.tmp", audit));
     }
@@ -858,14 +859,15 @@ mod tests {
         vault.insert("api_key".to_string(), SecureString::new("secret123".to_string()));
         vault.insert("password".to_string(), SecureString::new("hunter2".to_string()));
         
-        save_vault(&vault_file, &counter_file,&vault, &passphrase).unwrap();
-        let (loaded, _counter) = load_vault(&vault_file, &counter_file, &passphrase).unwrap();
+        save_vault(&vault_file, &counter_file, &vault, &passphrase).unwrap();
+        let (loaded, counter) = load_vault(&vault_file, &counter_file, &passphrase).unwrap();
         
+        //assert_eq!(counter, 1);
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.get("api_key").unwrap().as_str(), "secret123");
         assert_eq!(loaded.get("password").unwrap().as_str(), "hunter2");
         
-        cleanup(&vault_file, &audit_file);
+        cleanup(&vault_file, &counter_file,&audit_file);
     }
 
     #[test]
@@ -883,7 +885,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
         
-        cleanup(&vault_file, &audit_file);
+        cleanup(&vault_file, &counter_file, &audit_file);
     }
 
     #[test]
@@ -910,7 +912,7 @@ mod tests {
         assert!(result.is_err(), "Should detect rollback attack");
         assert!(result.unwrap_err().to_string().contains("Rollback"));
         
-        cleanup(&vault_file, &audit_file);
+        cleanup(&vault_file, &counter_file,&audit_file);
     }
 
     #[test]
@@ -932,12 +934,12 @@ mod tests {
         let result = load_vault(&vault_file, &counter_file, &passphrase);
         assert!(result.is_err());
         
-        cleanup(&vault_file, &audit_file);
+        cleanup(&vault_file, &counter_file, &audit_file);
     }
 
     #[test]
     fn test_audit_log_with_binary_data() {
-        let (vault_file, _counter_file, audit_file) = get_test_files();
+        let (vault_file, counter_file, audit_file) = get_test_files();
         let passphrase = SecureString::new("test".to_string());
         let audit_key = derive_audit_key(&passphrase).unwrap();
         
@@ -949,12 +951,12 @@ mod tests {
         // Should be able to read all entries without errors
         view_audit_log(&audit_file, &audit_key).unwrap();
         
-        cleanup(&vault_file, &audit_file);
+        cleanup(&vault_file, &counter_file, &audit_file);
     }
 
     #[test]
     fn test_passphrase_change_with_audit_rekey() {
-        let (vault_file, _counter_file,audit_file) = get_test_files();
+        let (vault_file, counter_file,audit_file) = get_test_files();
         let old_pass = SecureString::new("old".to_string());
         let new_pass = SecureString::new("new".to_string());
         
@@ -980,7 +982,7 @@ mod tests {
         });
         // Note: This may print warnings but shouldn't crash
         
-        cleanup(&vault_file, &audit_file);
+        cleanup(&vault_file, &counter_file, &audit_file);
     }
 
     #[test]
@@ -1006,6 +1008,6 @@ mod tests {
         let result = save_vault(&vault_file, &counter_file,&vault, &passphrase);
         assert!(result.is_err());
         
-        cleanup(&vault_file, &audit_file);
+        cleanup(&vault_file, &counter_file, &audit_file);
     }
 }
