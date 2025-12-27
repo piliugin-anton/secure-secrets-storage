@@ -27,7 +27,7 @@ const COUNTER_FILE: &str = "vault.counter";
 const SALT_SIZE: usize = 32;
 const KEY_SIZE: usize = 32;
 const XNONCE_SIZE: usize = 24; // XChaCha20 uses 192-bit nonces
-const VERSION: u8 = 2;
+const VERSION: u8 = 1;
 const COUNTER_SIZE: usize = 8;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -128,7 +128,7 @@ fn main() -> io::Result<()> {
         };
 
     match command.as_str() {
-        "add" if args.len() == 4 => {
+        "add" if args.len() == 3 => {
             let key = args[2].clone();
             let value = SecureString::new(prompt_password(&format!(
                 "Enter secret value for '{}': ",
@@ -278,7 +278,7 @@ fn main() -> io::Result<()> {
 fn print_usage() {
     println!("Secure Password Vault v2.0");
     println!("\nUsage:");
-    println!("  add <key> <value>   - Add a secret");
+    println!("  add <key>           - Add a secret");
     println!("  get <key>           - Get a secret");
     println!("  list                - List all keys");
     println!("  delete <key>        - Delete a secret");
