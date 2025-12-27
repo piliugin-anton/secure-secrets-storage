@@ -1550,7 +1550,7 @@ mod backup_tests {
         
         // Verify backup magic header
         assert_eq!(&backup_data[0..8], b"VAULTBAK");
-        assert_eq!(backup_data[8], 2); // Version
+        assert_eq!(backup_data[8], VERSION); // Version
         
         cleanup_all(&vault_file, &counter_file, &audit_file, &backup_file, &export_file);
     }
@@ -1621,26 +1621,35 @@ mod backup_tests {
         let (vault_file, counter_file, audit_file, backup_file, export_file) = get_test_files();
         let correct_pass = SecureString::new("correct".to_string());
         let wrong_pass = SecureString::new("wrong".to_string());
-        let counter_key = derive_counter_key(&correct_pass).unwrap();
+        let correct_counter_key = derive_counter_key(&correct_pass).unwrap();
         
         let mut vault = HashMap::new();
         vault.insert("key".to_string(), SecureString::new("value".to_string()));
         
-        save_vault(&vault_file, &counter_file, &vault, &correct_pass, &counter_key).unwrap();
+        save_vault(&vault_file, &counter_file, &vault, &correct_pass, &correct_counter_key).unwrap();
         backup_vault(&vault_file, &counter_file, &audit_file, &backup_file, &correct_pass).unwrap();
         
-        // Try to restore with wrong passphrase
-        // This should fail during HMAC verification
-        // Note: actual restore requires manual confirmation, so we test backup verification
+        // Verify backup was created successfully
+        assert!(Path::new(&backup_file).exists(), "Backup should exist");
+        
+        // Verify it's a valid backup file format
         let backup_data = fs::read(&backup_file).unwrap();
-        
-        // Verify it's a valid backup file
         assert_eq!(&backup_data[0..8], b"VAULTBAK");
+        assert_eq!(backup_data[8], VERSION);
         
-        // Attempting to create a new backup with wrong passphrase should fail on load
+        // Attempting to load vault with wrong passphrase should fail
         let wrong_counter_key = derive_counter_key(&wrong_pass).unwrap();
         let load_result = load_vault(&vault_file, &counter_file, &wrong_pass, &wrong_counter_key);
         assert!(load_result.is_err(), "Should fail with wrong passphrase");
+        
+        // Verify the error is related to authentication/decryption
+        match load_result {
+            Err(e) => {
+                assert_eq!(e.kind(), io::ErrorKind::InvalidData, 
+                    "Wrong passphrase should result in InvalidData error");
+            }
+            Ok(_) => panic!("Should have failed with wrong passphrase"),
+        }
         
         cleanup_all(&vault_file, &counter_file, &audit_file, &backup_file, &export_file);
     }
@@ -1672,7 +1681,7 @@ mod backup_tests {
         // Verify backup format
         let backup_data = fs::read(&backup_file).unwrap();
         assert_eq!(&backup_data[0..8], b"VAULTBAK");
-        assert_eq!(backup_data[8], 2); // Version
+        assert_eq!(backup_data[8], VERSION);
         
         cleanup_all(&vault_file, &counter_file, &audit_file, &backup_file, &export_file);
     }
