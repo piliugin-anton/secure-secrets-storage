@@ -122,7 +122,7 @@ fn main() -> io::Result<()> {
     let passphrase = SecureString::new(prompt_password("Enter passphrase: ")?);
 
     // Load vault with rollback protection
-    let mut vault = match load_vault(VAULT_FILE, &passphrase) {
+    let mut vault = match load_vault(VAULT_FILE, &passphrase, COUNTER_FILE) {
         Ok(v) => v,
         Err(e) if e.kind() == io::ErrorKind::InvalidData => {
             eprintln!("Error: Invalid passphrase, corrupted vault, or tampered data.");
@@ -456,15 +456,16 @@ fn save_vault(
 fn load_vault(
     vault_file: &str,
     passphrase: &SecureString,
+    counter_file: &str,
 ) -> io::Result<HashMap<String, SecureString>> {
-    let path = Path::new(vault_file);
-    if !path.exists() {
+    let vault_path = Path::new(vault_file);
+    if !vault_path.exists() {
         return Ok(HashMap::new());
     }
 
     #[cfg(unix)]
     {
-        let metadata = std::fs::metadata(path)?;
+        let metadata = std::fs::metadata(vault_file)?;
         let mode = metadata.permissions().mode() & 0o777;
         if mode != 0o600 {
             return Err(io::Error::new(
@@ -474,7 +475,7 @@ fn load_vault(
         }
     }
 
-    let file = OpenOptions::new().read(true).open(path)?;
+    let file = OpenOptions::new().read(true).open(vault_file)?;
     lock_file_shared(&file)?;
 
     let mut reader = BufReader::new(file);
@@ -507,7 +508,7 @@ fn load_vault(
     let (enc_key, auth_key) = derive_keys(passphrase, &salt)?;
 
     // FIX 3: Check rollback protection
-    if let Some(stored_counter) = read_stored_counter(COUNTER_FILE, &auth_key)? {
+    if let Some(stored_counter) = read_stored_counter(counter_file, &auth_key)? {
         if counter < stored_counter {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -548,9 +549,9 @@ fn load_vault(
             vault.insert(k.to_string(), SecureString::new(v.to_string()));
         }
     }
-    
+
     // FIX 3: Update stored counter on successful load
-    write_stored_counter(COUNTER_FILE, counter, &auth_key)?;
+    write_stored_counter(counter_file, counter, &auth_key)?;
 
     Ok(vault)
 }
@@ -859,7 +860,7 @@ mod tests {
         vault.insert("password".to_string(), SecureString::new("hunter2".to_string()));
         
         save_vault(&vault_file, &vault, &passphrase).unwrap();
-        let loaded = load_vault(&vault_file, &passphrase).unwrap();
+        let loaded = load_vault(&vault_file, &passphrase, &counter_file).unwrap();
         
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.get("api_key").unwrap().as_str(), "secret123");
@@ -878,7 +879,7 @@ mod tests {
         vault.insert("key".to_string(), SecureString::new("value".to_string()));
         
         save_vault(&vault_file, &vault, &correct).unwrap();
-        let result = load_vault(&vault_file, &wrong);
+        let result = load_vault(&vault_file, &wrong, &counter_file);
         
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
@@ -908,7 +909,7 @@ mod tests {
         fs::write(&vault_file, vault1_backup).unwrap();
         
         // Should detect rollback
-        let result = load_vault(&vault_file, &passphrase);
+        let result = load_vault(&vault_file, &passphrase, &counter_file);
         assert!(result.is_err(), "Should detect rollback attack");
         assert!(result.unwrap_err().to_string().contains("Rollback"));
         
@@ -931,7 +932,7 @@ mod tests {
         }
         fs::write(&vault_file, data).unwrap();
         
-        let result = load_vault(&vault_file, &passphrase);
+        let result = load_vault(&vault_file, &passphrase, &counter_file);
         assert!(result.is_err());
         
         cleanup(&vault_file, &audit_file, &counter_file);

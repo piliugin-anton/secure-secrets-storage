@@ -4,3 +4,4 @@ vault.counter
 audit.log
 test_vault_*.enc
 test_audit_*.log
+test_vault_*.counter
