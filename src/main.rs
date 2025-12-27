@@ -447,7 +447,7 @@ fn save_vault(
     std::fs::rename(&temp_file, vault_file)?;
     
     // FIX 3: Update stored counter
-    write_stored_counter(COUNTER_FILE, new_counter, &auth_key)?;
+    write_stored_counter(vault_file, new_counter, &auth_key)?;
 
     Ok(())
 }
