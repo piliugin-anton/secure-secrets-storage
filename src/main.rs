@@ -1,15 +1,3 @@
-// Cargo.toml dependencies:
-// [dependencies]
-// chacha20poly1305 = "0.10"
-// argon2 = { version = "0.5", features = ["std"] }
-// zeroize = { version = "1.7", features = ["derive"] }
-// hkdf = "0.12"
-// hmac = "0.12"
-// sha2 = "0.10"
-// rand = "0.8"
-// rpassword = "7.0"
-// chrono = "0.4"
-
 use chacha20poly1305::{
     aead::{Aead, KeyInit, OsRng},
     XChaCha20Poly1305, XNonce,
@@ -18,13 +6,13 @@ use argon2::{Argon2, Algorithm, Version, Params};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroizing};
 use rpassword::prompt_password;
 use rand::RngCore;
 use std::collections::HashMap;
 use std::env;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -137,8 +125,6 @@ fn main() -> io::Result<()> {
         }
         Err(e) => return Err(e),
     };
-
-    
 
     match command.as_str() {
         "add" if args.len() == 4 => {
