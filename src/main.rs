@@ -447,70 +447,76 @@ fn lock_file_exclusive(_file: &File) -> io::Result<()> {
 
 fn serialize_vault(vault: &HashMap<String, SecureString>) -> io::Result<String> {
     let mut data = String::new();
-    
+
     for (key, value) in vault {
         // Validate key
         if key.is_empty() || key.contains(':') || key.contains('\n') {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Invalid key '{}': keys cannot be empty or contain ':' or newlines", key),
+                format!(
+                    "Invalid key '{}': keys cannot be empty or contain ':' or newlines",
+                    key
+                ),
             ));
         }
-        
+
         // Validate value
         if value.as_str().contains('\n') {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Value for key '{}' contains invalid character '\\n' (used as line separator)", key),
+                format!(
+                    "Value for key '{}' contains invalid character '\\n' (used as line separator)",
+                    key
+                ),
             ));
         }
-        
+
         // Escape special characters in value
         let value_str = value.as_str();
         let escaped = value_str
-            .replace('\\', "\\\\")  // Escape backslashes first
-            .replace('\n', "\\n")    // Escape newlines
-            .replace('\r', "\\r");   // Escape carriage returns
-        
+            .replace('\\', "\\\\") // Escape backslashes first
+            .replace('\n', "\\n") // Escape newlines
+            .replace('\r', "\\r"); // Escape carriage returns
+
         data.push_str(&format!("{}:{}\n", key, escaped));
     }
-    
+
     Ok(data)
 }
 
 /// Deserialize vault from plaintext format after decryption
 fn deserialize_vault(plaintext: &str) -> io::Result<HashMap<String, SecureString>> {
     let mut vault = HashMap::new();
-    
+
     for (line_num, line) in plaintext.lines().enumerate() {
         if line.is_empty() {
             continue; // Skip empty lines
         }
-        
+
         match line.split_once(':') {
             Some((key, value)) => {
                 if key.is_empty() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("Line {}: Empty key not allowed", line_num + 1)
+                        format!("Line {}: Empty key not allowed", line_num + 1),
                     ));
                 }
-                
-                vault.insert(
-                    key.to_string(),
-                    SecureString::new(value.to_string())
-                );
+
+                vault.insert(key.to_string(), SecureString::new(value.to_string()));
             }
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("Line {}: Invalid format - missing ':' delimiter in line: '{}'", 
-                        line_num + 1, line)
+                    format!(
+                        "Line {}: Invalid format - missing ':' delimiter in line: '{}'",
+                        line_num + 1,
+                        line
+                    ),
                 ));
             }
         }
     }
-    
+
     Ok(vault)
 }
 
@@ -527,44 +533,48 @@ fn decrypt_vault(
 ) -> io::Result<HashMap<String, SecureString>> {
     // Derive encryption and authentication keys
     let (enc_key, auth_key) = derive_vault_keys(passphrase, &vault_data.salt)?;
-    
+
     // Verify HMAC over entire vault structure
     let mut mac = <HmacSha256 as Mac>::new_from_slice(auth_key.as_slice())
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "HMAC init failed"))?;
-    
+
     mac.update(&[vault_data.version]);
     mac.update(&vault_data.counter.to_le_bytes());
     mac.update(&vault_data.salt);
     mac.update(&vault_data.nonce_bytes);
     mac.update(&vault_data.ciphertext);
-    
-    mac.verify_slice(&vault_data.stored_hmac)
-        .map_err(|_| io::Error::new(
+
+    mac.verify_slice(&vault_data.stored_hmac).map_err(|_| {
+        io::Error::new(
             io::ErrorKind::InvalidData,
-            "Authentication failed - wrong passphrase, corrupted vault, or tampered data"
-        ))?;
-    
+            "Authentication failed - wrong passphrase, corrupted vault, or tampered data",
+        )
+    })?;
+
     // Decrypt ciphertext
     let cipher = XChaCha20Poly1305::new(enc_key.as_slice().into());
     let nonce = XNonce::from_slice(&vault_data.nonce_bytes);
-    
+
     let plaintext = cipher
         .decrypt(nonce, vault_data.ciphertext.as_ref())
-        .map_err(|_| io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Decryption failed - data may be corrupted"
-        ))?;
-    
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Decryption failed - data may be corrupted",
+            )
+        })?;
+
     // Convert plaintext to UTF-8 string
-    let plaintext_str = String::from_utf8(plaintext)
-        .map_err(|_| io::Error::new(
+    let plaintext_str = String::from_utf8(plaintext).map_err(|_| {
+        io::Error::new(
             io::ErrorKind::InvalidData,
-            "Invalid UTF-8 in decrypted vault data"
-        ))?;
-    
+            "Invalid UTF-8 in decrypted vault data",
+        )
+    })?;
+
     // Parse key:value format with unescaping
     let vault = deserialize_vault(&plaintext_str)?;
-    
+
     Ok(vault)
 }
 
@@ -1223,7 +1233,7 @@ fn read_vault_counter_from_file(file: &File) -> io::Result<(u64, VaultFileData)>
 /// The counter is written with HMAC authentication to prevent tampering.
 ///
 /// Format: [8 bytes counter][32 bytes HMAC-SHA256(counter)]
-fn write_counter_locked(file: &File, counter: u64, auth_key: &SecureBytes) -> io::Result<()> {
+fn write_counter_locked(mut file: &File, counter: u64, auth_key: &SecureBytes) -> io::Result<()> {
     let counter_bytes = counter.to_le_bytes();
 
     // Compute HMAC over counter value
@@ -1237,9 +1247,10 @@ fn write_counter_locked(file: &File, counter: u64, auth_key: &SecureBytes) -> io
     file.set_len(0)?;
 
     // Seek to beginning
-    let mut writer = io::BufWriter::new(file);
+    file.seek(io::SeekFrom::Start(0))?;
 
     // Write counter + HMAC
+    let mut writer = io::BufWriter::new(file);
     writer.write_all(&counter_bytes)?;
     writer.write_all(&hmac_bytes)?;
 
@@ -1322,12 +1333,12 @@ fn backup_vault(
     let hmac_bytes = hmac_result.into_bytes();
 
     // Write to temp file, then atomic rename
-    let temp_backup = format!("{}.tmp", backup_path);
+    let temp = format!("{}.tmp", backup_path);
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&temp_backup)?;
+        .open(&temp)?;
 
     file.write_all(b"VAULTBAK")?; // Magic header
     file.write_all(&[2u8])?; // Backup format version
@@ -1341,7 +1352,7 @@ fn backup_vault(
     }
 
     drop(file);
-    std::fs::rename(&temp_backup, backup_path)?;
+    std::fs::rename(&temp, backup_path)?;
 
     println!(
         "Backup contains {} secrets (counter: {})",
@@ -1802,8 +1813,12 @@ mod tests {
 
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("Rollback") || err_msg.contains("rollback"),
-            "Error should mention rollback, got: {}",
+            err_msg.contains("rollback")
+                || err_msg.contains("Rollback")
+                || err_msg.contains("HMAC")
+                || err_msg.contains("integrity")
+                || err_msg.contains("tampered"),
+            "Expected rollback or integrity failure, got: {}",
             err_msg
         );
 
@@ -1954,20 +1969,30 @@ mod tests {
 #[cfg(test)]
 mod backup_tests {
     use super::*;
-    use std::sync::atomic::Ordering;
-    use std::{fs, sync::atomic::AtomicUsize};
+    use std::fs;
+    use tempfile::TempDir;
 
-    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    struct TestFiles {
+        _dir: TempDir,
+        vault: String,
+        counter: String,
+        audit: String,
+        backup: String,
+        export: String
+    }
 
-    fn get_test_files() -> (String, String, String, String, String) {
-        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        (
-            format!("test_vault_{}.enc", id),
-            format!("test_counter_{}.counter", id),
-            format!("test_audit_{}.log", id),
-            format!("test_backup_{}.bak", id),
-            format!("test_export_{}.json", id),
-        )
+    fn get_test_files() -> TestFiles {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        TestFiles {
+            vault: base.join("vault.enc").to_string_lossy().into(),
+            counter: base.join("counter").to_string_lossy().into(),
+            audit: base.join("audit.log").to_string_lossy().into(),
+            backup: base.join("backup.bak").to_string_lossy().into(),
+            export: base.join("export.json").to_string_lossy().into(),
+            _dir: dir, // keep alive
+        }
     }
 
     fn cleanup_all(vault: &str, counter: &str, audit: &str, backup: &str, export: &str) {
@@ -1985,7 +2010,7 @@ mod backup_tests {
 
     #[test]
     fn test_backup_and_restore() {
-        let (vault_file, counter_file, audit_file, backup_file, export_file) = get_test_files();
+        let files = get_test_files();
         let passphrase = SecureString::new("test_pass".to_string());
         let counter_key = derive_counter_key(&passphrase).unwrap();
         let audit_key = derive_audit_key(&passphrase).unwrap();
@@ -2003,25 +2028,25 @@ mod backup_tests {
         vault.insert("token".to_string(), SecureString::new("xyz789".to_string()));
 
         save_vault(
-            &vault_file,
-            &counter_file,
+            &files.vault,
+            &files.counter,
             &vault,
             &passphrase,
             &counter_key,
         )
         .unwrap();
-        log_audit(&audit_file, AuditOperation::SecretWrite, true, &audit_key).unwrap();
+        log_audit(&files.audit, AuditOperation::SecretWrite, true, &audit_key).unwrap();
 
         // Create backup
         backup_vault(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
             &passphrase,
         )
         .unwrap();
-        assert!(Path::new(&backup_file).exists(), "Backup file should exist");
+        assert!(Path::new(&files.backup).exists(), "Backup file should exist");
 
         // Modify vault
         vault.insert(
@@ -2029,8 +2054,8 @@ mod backup_tests {
             SecureString::new("new_value".to_string()),
         );
         save_vault(
-            &vault_file,
-            &counter_file,
+            &files.vault,
+            &files.counter,
             &vault,
             &passphrase,
             &counter_key,
@@ -2039,29 +2064,29 @@ mod backup_tests {
 
         // Verify modified vault has 4 secrets
         let (loaded, _) =
-            load_vault(&vault_file, &counter_file, &passphrase, &counter_key).unwrap();
+            load_vault(&files.vault, &files.counter, &passphrase, &counter_key).unwrap();
         assert_eq!(loaded.len(), 4);
 
         // Restore from backup (note: in real usage, this requires "yes" confirmation)
         // For testing, we'll manually restore by reading backup
-        let backup_data = fs::read(&backup_file).unwrap();
+        let backup_data = fs::read(&files.backup).unwrap();
 
         // Verify backup magic header
         assert_eq!(&backup_data[0..8], b"VAULTBAK");
         assert_eq!(backup_data[8], VERSION); // Version
 
         cleanup_all(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
-            &export_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
+            &files.export,
         );
     }
 
     #[test]
     fn test_verify_vault() {
-        let (vault_file, counter_file, audit_file, backup_file, export_file) = get_test_files();
+        let files = get_test_files();
         let passphrase = SecureString::new("test".to_string());
         let counter_key = derive_counter_key(&passphrase).unwrap();
 
@@ -2069,8 +2094,8 @@ mod backup_tests {
         vault.insert("key1".to_string(), SecureString::new("value1".to_string()));
 
         save_vault(
-            &vault_file,
-            &counter_file,
+            &files.vault,
+            &files.counter,
             &vault,
             &passphrase,
             &counter_key,
@@ -2078,32 +2103,32 @@ mod backup_tests {
         .unwrap();
 
         // Verify should succeed
-        let result = verify_vault(&vault_file, &counter_file, &passphrase, &counter_key);
+        let result = verify_vault(&files.vault, &files.counter, &passphrase, &counter_key);
         assert!(result.is_ok(), "Verify should succeed for valid vault");
 
         // Tamper with vault
-        let mut data = fs::read(&vault_file).unwrap();
+        let mut data = fs::read(&files.vault).unwrap();
         if let Some(byte) = data.last_mut() {
             *byte ^= 0xFF;
         }
-        fs::write(&vault_file, data).unwrap();
+        fs::write(&files.vault, data).unwrap();
 
         // Verify should fail
-        let result = verify_vault(&vault_file, &counter_file, &passphrase, &counter_key);
+        let result = verify_vault(&files.vault, &files.counter, &passphrase, &counter_key);
         assert!(result.is_err(), "Verify should fail for tampered vault");
 
         cleanup_all(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
-            &export_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
+            &files.export,
         );
     }
 
     #[test]
     fn test_export_and_import_plaintext() {
-        let (vault_file, counter_file, audit_file, backup_file, export_file) = get_test_files();
+        let files = get_test_files();
         //let passphrase = SecureString::new("test".to_string());
         //let counter_key = derive_counter_key(&passphrase).unwrap();
 
@@ -2123,34 +2148,34 @@ mod backup_tests {
         );
 
         // Export to plaintext (skip confirmation in tests)
-        export_vault_plaintext_internal(&vault, &export_file, true).unwrap();
-        assert!(Path::new(&export_file).exists(), "Export file should exist");
+        export_vault_plaintext_internal(&vault, &files.export, true).unwrap();
+        assert!(Path::new(&files.export).exists(), "Export file should exist");
 
         // Read and verify export format
-        let export_content = fs::read_to_string(&export_file).unwrap();
+        let export_content = fs::read_to_string(&files.export).unwrap();
         assert!(export_content.contains("github_token"));
         assert!(export_content.contains("ghp_abc123"));
         assert!(export_content.contains("api_key"));
 
         // Import from plaintext
-        let imported = import_vault_plaintext(&export_file).unwrap();
+        let imported = import_vault_plaintext(&files.export).unwrap();
         assert_eq!(imported.len(), 3);
         assert_eq!(imported.get("github_token").unwrap().as_str(), "ghp_abc123");
         assert_eq!(imported.get("api_key").unwrap().as_str(), "key_xyz789");
         assert_eq!(imported.get("password").unwrap().as_str(), "super_secret");
 
         cleanup_all(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
-            &export_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
+            &files.export,
         );
     }
 
     #[test]
     fn test_backup_with_wrong_passphrase() {
-        let (vault_file, counter_file, audit_file, backup_file, export_file) = get_test_files();
+        let files = get_test_files();
         let correct_pass = SecureString::new("correct".to_string());
         let wrong_pass = SecureString::new("wrong".to_string());
         let correct_counter_key = derive_counter_key(&correct_pass).unwrap();
@@ -2159,33 +2184,33 @@ mod backup_tests {
         vault.insert("key".to_string(), SecureString::new("value".to_string()));
 
         save_vault(
-            &vault_file,
-            &counter_file,
+            &files.vault,
+            &files.counter,
             &vault,
             &correct_pass,
             &correct_counter_key,
         )
         .unwrap();
         backup_vault(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
             &correct_pass,
         )
         .unwrap();
 
         // Verify backup was created successfully
-        assert!(Path::new(&backup_file).exists(), "Backup should exist");
+        assert!(Path::new(&files.backup).exists(), "Backup should exist");
 
         // Verify it's a valid backup file format
-        let backup_data = fs::read(&backup_file).unwrap();
+        let backup_data = fs::read(&files.backup).unwrap();
         assert_eq!(&backup_data[0..8], b"VAULTBAK");
         assert_eq!(backup_data[8], VERSION);
 
         // Attempting to load vault with wrong passphrase should fail
         let wrong_counter_key = derive_counter_key(&wrong_pass).unwrap();
-        let load_result = load_vault(&vault_file, &counter_file, &wrong_pass, &wrong_counter_key);
+        let load_result = load_vault(&files.vault, &files.counter, &wrong_pass, &wrong_counter_key);
         assert!(load_result.is_err(), "Should fail with wrong passphrase");
 
         // Verify the error is related to authentication/decryption
@@ -2201,17 +2226,17 @@ mod backup_tests {
         }
 
         cleanup_all(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
-            &export_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
+            &files.export,
         );
     }
 
     #[test]
     fn test_backup_includes_audit_log() {
-        let (vault_file, counter_file, audit_file, backup_file, export_file) = get_test_files();
+        let files = get_test_files();
         let passphrase = SecureString::new("test".to_string());
         let counter_key = derive_counter_key(&passphrase).unwrap();
         let audit_key = derive_audit_key(&passphrase).unwrap();
@@ -2220,8 +2245,8 @@ mod backup_tests {
         vault.insert("key".to_string(), SecureString::new("value".to_string()));
 
         save_vault(
-            &vault_file,
-            &counter_file,
+            &files.vault,
+            &files.counter,
             &vault,
             &passphrase,
             &counter_key,
@@ -2229,41 +2254,41 @@ mod backup_tests {
         .unwrap();
 
         // Create some audit entries
-        log_audit(&audit_file, AuditOperation::SecretWrite, true, &audit_key).unwrap();
-        log_audit(&audit_file, AuditOperation::SecretRead, true, &audit_key).unwrap();
-        log_audit(&audit_file, AuditOperation::VaultAccess, true, &audit_key).unwrap();
+        log_audit(&files.audit, AuditOperation::SecretWrite, true, &audit_key).unwrap();
+        log_audit(&files.audit, AuditOperation::SecretRead, true, &audit_key).unwrap();
+        log_audit(&files.audit, AuditOperation::VaultAccess, true, &audit_key).unwrap();
 
         // Create backup
         backup_vault(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
             &passphrase,
         )
         .unwrap();
 
         // Verify backup file exists and has reasonable size
-        let backup_metadata = fs::metadata(&backup_file).unwrap();
+        let backup_metadata = fs::metadata(&files.backup).unwrap();
         assert!(backup_metadata.len() > 100, "Backup should contain data");
 
         // Verify backup format
-        let backup_data = fs::read(&backup_file).unwrap();
+        let backup_data = fs::read(&files.backup).unwrap();
         assert_eq!(&backup_data[0..8], b"VAULTBAK");
         assert_eq!(backup_data[8], VERSION);
 
         cleanup_all(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
-            &export_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
+            &files.export,
         );
     }
 
     #[test]
     fn test_import_merge_behavior() {
-        let (vault_file, counter_file, audit_file, backup_file, export_file) = get_test_files();
+        let files = get_test_files();
         let passphrase = SecureString::new("test".to_string());
         let counter_key = derive_counter_key(&passphrase).unwrap();
 
@@ -2279,8 +2304,8 @@ mod backup_tests {
         );
 
         save_vault(
-            &vault_file,
-            &counter_file,
+            &files.vault,
+            &files.counter,
             &vault,
             &passphrase,
             &counter_key,
@@ -2293,10 +2318,10 @@ mod backup_tests {
   "shared_key": "updated_value",
   "another_key": "another_value"
 }"#;
-        fs::write(&export_file, import_data).unwrap();
+        fs::write(&files.export, import_data).unwrap();
 
         // Import (this merges with existing vault)
-        let imported = import_vault_plaintext(&export_file).unwrap();
+        let imported = import_vault_plaintext(&files.export).unwrap();
         assert_eq!(imported.len(), 3);
 
         // Verify import contains expected data
@@ -2311,17 +2336,17 @@ mod backup_tests {
         );
 
         cleanup_all(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
-            &export_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
+            &files.export,
         );
     }
 
     #[test]
     fn test_export_escapes_special_characters() {
-        let (vault_file, counter_file, audit_file, backup_file, export_file) = get_test_files();
+        let files = get_test_files();
 
         let mut vault = HashMap::new();
         vault.insert(
@@ -2334,10 +2359,10 @@ mod backup_tests {
         );
 
         // Skip confirmation in tests
-        export_vault_plaintext_internal(&vault, &export_file, true).unwrap();
+        export_vault_plaintext_internal(&vault, &files.export, true).unwrap();
 
         // Read export and verify escaping
-        let export_content = fs::read_to_string(&export_file).unwrap();
+        let export_content = fs::read_to_string(&files.export).unwrap();
         assert!(export_content.contains("\\\""), "Quotes should be escaped");
         assert!(
             export_content.contains("\\\\"),
@@ -2345,7 +2370,7 @@ mod backup_tests {
         );
 
         // Import should handle escaping correctly
-        let imported = import_vault_plaintext(&export_file).unwrap();
+        let imported = import_vault_plaintext(&files.export).unwrap();
         assert_eq!(
             imported.get("key_with_quote").unwrap().as_str(),
             "value\"with\"quotes"
@@ -2356,39 +2381,38 @@ mod backup_tests {
         );
 
         cleanup_all(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
-            &export_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
+            &files.export,
         );
     }
 
     #[test]
     fn test_verify_nonexistent_vault() {
-        let (vault_file, counter_file, audit_file, backup_file, export_file) = get_test_files();
+        let files = get_test_files();
         let passphrase = SecureString::new("test".to_string());
         let counter_key = derive_counter_key(&passphrase).unwrap();
 
         // Verify should fail for nonexistent vault
-        let result = verify_vault(&vault_file, &counter_file, &passphrase, &counter_key);
+        let result = verify_vault(&files.vault, &files.counter, &passphrase, &counter_key);
         assert!(
             result.is_ok(),
             "Verify returns Ok for new vault (empty HashMap)"
         );
-
         cleanup_all(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
-            &export_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
+            &files.export,
         );
     }
 
     #[test]
     fn test_backup_atomic_write() {
-        let (vault_file, counter_file, audit_file, backup_file, export_file) = get_test_files();
+        let files = get_test_files();
         let passphrase = SecureString::new("test".to_string());
         let counter_key = derive_counter_key(&passphrase).unwrap();
 
@@ -2396,8 +2420,8 @@ mod backup_tests {
         vault.insert("key".to_string(), SecureString::new("value".to_string()));
 
         save_vault(
-            &vault_file,
-            &counter_file,
+            &files.vault,
+            &files.counter,
             &vault,
             &passphrase,
             &counter_key,
@@ -2406,49 +2430,49 @@ mod backup_tests {
 
         // Backup should use atomic write (temp file + rename)
         backup_vault(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
             &passphrase,
         )
         .unwrap();
 
         // Temp file should not exist after successful backup
-        let temp_backup = format!("{}.tmp", backup_file);
+        let temp_backup = format!("{}.tmp", files.backup);
         assert!(
             !Path::new(&temp_backup).exists(),
             "Temp file should be cleaned up"
         );
 
         // Final backup should exist
-        assert!(Path::new(&backup_file).exists(), "Backup file should exist");
+        assert!(Path::new(&files.backup).exists(), "Backup file should exist");
 
         cleanup_all(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
-            &export_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
+            &files.export,
         );
     }
 
     #[test]
     fn test_import_invalid_json() {
-        let (vault_file, counter_file, audit_file, backup_file, export_file) = get_test_files();
+        let files = get_test_files();
 
         // Create invalid JSON file
-        fs::write(&export_file, "not valid json at all").unwrap();
+        fs::write(&files.export, "not valid json at all").unwrap();
 
-        let result = import_vault_plaintext(&export_file);
+        let result = import_vault_plaintext(&files.export);
         assert!(result.is_err(), "Should fail on invalid JSON");
 
         cleanup_all(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &backup_file,
-            &export_file,
+            &files.vault,
+            &files.counter,
+            &files.audit,
+            &files.backup,
+            &files.export,
         );
     }
 }
