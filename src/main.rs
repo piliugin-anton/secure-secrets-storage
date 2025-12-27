@@ -392,23 +392,6 @@ fn lock_file_exclusive(_file: &File) -> io::Result<()> {
     Ok(()) // No-op on non-Unix platforms
 }
 
-// Read the counter from an existing vault file
-/* fn read_vault_counter(vault_file: &str) -> io::Result<u64> {
-    let mut file = File::open(vault_file)?;
-    
-    let mut version = [0u8; 1];
-    file.read_exact(&mut version)?;
-    
-    if version[0] != VERSION {
-        return Ok(0); // Old version, start from 0
-    }
-    
-    let mut counter_bytes = [0u8; COUNTER_SIZE];
-    file.read_exact(&mut counter_bytes)?;
-    
-    Ok(u64::from_le_bytes(counter_bytes))
-} */
-
 // Save vault with rollback protection
 fn save_vault(
     vault_file: &str,
