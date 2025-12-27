@@ -34,11 +34,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 
 const VAULT_FILE: &str = "vault.enc";
-const AUDIT_FILE: &str = "audit.log";
+const AUDIT_FILE: &str = "vault_audit.log";
+const COUNTER_FILE: &str = "vault.counter";
 const SALT_SIZE: usize = 32;
 const KEY_SIZE: usize = 32;
 const XNONCE_SIZE: usize = 24; // XChaCha20 uses 192-bit nonces
-const VERSION: u8 = 2; // Incremented version for new format
+const VERSION: u8 = 2;
 const COUNTER_SIZE: usize = 8;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -121,14 +122,14 @@ fn main() -> io::Result<()> {
     let passphrase = SecureString::new(prompt_password("Enter passphrase: ")?);
 
     // Load vault with rollback protection
-    let mut vault = match load_vault(VAULT_FILE, &passphrase) {
+    let (mut vault, _counter) = match load_vault(VAULT_FILE, COUNTER_FILE,&passphrase) {
         Ok(v) => v,
         Err(e) if e.kind() == io::ErrorKind::InvalidData => {
             eprintln!("Error: Invalid passphrase, corrupted vault, or tampered data.");
             return Err(e);
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            HashMap::new() // New vault
+            (HashMap::new(), 0) // New vault
         }
         Err(e) => return Err(e),
     };
@@ -141,7 +142,7 @@ fn main() -> io::Result<()> {
             let key = args[2].clone();
             let value = SecureString::new(args[3].clone());
             vault.insert(key.clone(), value);
-            save_vault(VAULT_FILE, &vault, &passphrase)?;
+            save_vault(VAULT_FILE, COUNTER_FILE, &vault, &passphrase)?;
             log_audit(AUDIT_FILE, AuditOperation::SecretWrite, true, &audit_key)?;
             println!("Secret added successfully.");
         }
@@ -169,7 +170,7 @@ fn main() -> io::Result<()> {
         "delete" if args.len() == 3 => {
             let key = &args[2];
             if vault.remove(key).is_some() {
-                save_vault(VAULT_FILE, &vault, &passphrase)?;
+                save_vault(VAULT_FILE, COUNTER_FILE, &vault, &passphrase)?;
                 log_audit(AUDIT_FILE, AuditOperation::SecretDelete, true, &audit_key)?;
                 println!("Secret deleted successfully.");
             } else {
@@ -193,7 +194,7 @@ fn main() -> io::Result<()> {
             let new_audit_key = derive_audit_key(&new_passphrase)?;
             rekey_audit_log(AUDIT_FILE, &audit_key, &new_audit_key)?;
             
-            save_vault(VAULT_FILE, &vault, &new_passphrase)?;
+            save_vault(VAULT_FILE, COUNTER_FILE, &vault, &new_passphrase)?;
             log_audit(AUDIT_FILE, AuditOperation::PassphraseChange, true, &new_audit_key)?;
             
             println!("Passphrase changed successfully.");
@@ -345,7 +346,7 @@ fn lock_file_exclusive(_file: &File) -> io::Result<()> {
 }
 
 // Read the counter from an existing vault file
-fn read_vault_counter(vault_file: &str) -> io::Result<u64> {
+/* fn read_vault_counter(vault_file: &str) -> io::Result<u64> {
     let mut file = File::open(vault_file)?;
     
     let mut version = [0u8; 1];
@@ -359,22 +360,15 @@ fn read_vault_counter(vault_file: &str) -> io::Result<u64> {
     file.read_exact(&mut counter_bytes)?;
     
     Ok(u64::from_le_bytes(counter_bytes))
-}
+} */
 
 // Save vault with rollback protection
 fn save_vault(
     vault_file: &str,
+    counter_file: &str,
     vault: &HashMap<String, SecureString>,
     passphrase: &SecureString,
-) -> io::Result<()> {
-    let current_counter = if Path::new(vault_file).exists() {
-        read_vault_counter(vault_file).unwrap_or(0)
-    } else {
-        0
-    };
-    
-    let new_counter = current_counter + 1;
-    
+) -> io::Result<u64> {    
     let mut data = String::new();
     for (k, v) in vault {
         if k.contains(':') || v.as_str().contains('\n') {
@@ -394,6 +388,14 @@ fn save_vault(
     rng.fill_bytes(&mut nonce_bytes);
 
     let (enc_key, auth_key) = derive_keys(passphrase, &salt)?;
+
+    let current_counter = if let Some(counter) = read_stored_counter(counter_file, &auth_key)? {
+        counter
+    } else {
+        0
+    };
+    
+    let new_counter = current_counter + 1;
 
     let cipher = XChaCha20Poly1305::new(enc_key.as_slice().into());
     let nonce = XNonce::from_slice(&nonce_bytes);
@@ -448,17 +450,18 @@ fn save_vault(
     // FIX 3: Update stored counter
     write_stored_counter(vault_file, new_counter, &auth_key)?;
 
-    Ok(())
+    Ok(new_counter)
 }
 
 // Load vault with authentication and rollback protection
 fn load_vault(
     vault_file: &str,
+    counter_file: &str,
     passphrase: &SecureString,
-) -> io::Result<HashMap<String, SecureString>> {
+) -> io::Result<(HashMap<String, SecureString>, u64)> {
     let vault_path = Path::new(vault_file);
     if !vault_path.exists() {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), 0));
     }
 
     #[cfg(unix)]
@@ -506,14 +509,13 @@ fn load_vault(
     let (enc_key, auth_key) = derive_keys(passphrase, &salt)?;
 
     // FIX 3: Check rollback protection
-    if let Some(stored_counter) = read_stored_counter(vault_file, &auth_key)? {
-        if counter < stored_counter {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("SECURITY: Rollback attack detected! Counter {} < expected {}", 
-                    counter, stored_counter)
-            ));
-        }
+    let loaded_counter = read_stored_counter(&counter_file, &auth_key)?.unwrap();
+    if counter < loaded_counter {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("SECURITY: Rollback attack detected! Counter {} < expected {}", 
+                counter, loaded_counter)
+        ));
     }
 
     let mut mac = <HmacSha256 as Mac>::new_from_slice(auth_key.as_slice())
@@ -551,7 +553,7 @@ fn load_vault(
     // FIX 3: Update stored counter on successful load
     write_stored_counter(vault_file, counter, &auth_key)?;
 
-    Ok(vault)
+    Ok((vault, loaded_counter))
 }
 
 fn log_audit(
@@ -831,10 +833,11 @@ mod tests {
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    fn get_test_files() -> (String, String) {
+    fn get_test_files() -> (String, String, String) {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
         (
             format!("test_vault_{}.enc", id),
+            format!("test_counter_{}.counter", id),
             format!("test_audit_{}.log", id),
         )
     }
@@ -848,15 +851,15 @@ mod tests {
 
     #[test]
     fn test_save_and_load_vault() {
-        let (vault_file, audit_file) = get_test_files();
+        let (vault_file, counter_file, audit_file) = get_test_files();
         let passphrase = SecureString::new("test_password_123".to_string());
         
         let mut vault = HashMap::new();
         vault.insert("api_key".to_string(), SecureString::new("secret123".to_string()));
         vault.insert("password".to_string(), SecureString::new("hunter2".to_string()));
         
-        save_vault(&vault_file, &vault, &passphrase).unwrap();
-        let loaded = load_vault(&vault_file, &passphrase).unwrap();
+        save_vault(&vault_file, &counter_file,&vault, &passphrase).unwrap();
+        let (loaded, _counter) = load_vault(&vault_file, &counter_file, &passphrase).unwrap();
         
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.get("api_key").unwrap().as_str(), "secret123");
@@ -867,15 +870,15 @@ mod tests {
 
     #[test]
     fn test_wrong_passphrase() {
-        let (vault_file, audit_file) = get_test_files();
+        let (vault_file, counter_file, audit_file) = get_test_files();
         let correct = SecureString::new("correct".to_string());
         let wrong = SecureString::new("wrong".to_string());
         
         let mut vault = HashMap::new();
         vault.insert("key".to_string(), SecureString::new("value".to_string()));
         
-        save_vault(&vault_file, &vault, &correct).unwrap();
-        let result = load_vault(&vault_file, &wrong);
+        save_vault(&vault_file, &counter_file, &vault, &correct).unwrap();
+        let result = load_vault(&vault_file, &counter_file, &wrong);
         
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
@@ -885,19 +888,17 @@ mod tests {
 
     #[test]
     fn test_rollback_protection() {
-        let (vault_file, audit_file) = get_test_files();
+        let (vault_file, counter_file, audit_file) = get_test_files();
         let passphrase = SecureString::new("test".to_string());
         
         let mut vault = HashMap::new();
         vault.insert("key".to_string(), SecureString::new("v1".to_string()));
         
-        save_vault(&vault_file, &vault, &passphrase).unwrap();
+        let counter1 = save_vault(&vault_file, &counter_file,&vault, &passphrase).unwrap();
         let vault1_backup = fs::read(&vault_file).unwrap();
-        let counter1 = read_vault_counter(&vault_file).unwrap();
         
         vault.insert("key".to_string(), SecureString::new("v2".to_string()));
-        save_vault(&vault_file, &vault, &passphrase).unwrap();
-        let counter2 = read_vault_counter(&vault_file).unwrap();
+        let counter2 = save_vault(&vault_file, &counter_file, &vault, &passphrase).unwrap();
         
         assert!(counter2 > counter1, "Counter should increment");
         
@@ -905,7 +906,7 @@ mod tests {
         fs::write(&vault_file, vault1_backup).unwrap();
         
         // Should detect rollback
-        let result = load_vault(&vault_file, &passphrase);
+        let result = load_vault(&vault_file, &counter_file, &passphrase);
         assert!(result.is_err(), "Should detect rollback attack");
         assert!(result.unwrap_err().to_string().contains("Rollback"));
         
@@ -914,12 +915,12 @@ mod tests {
 
     #[test]
     fn test_tampering_detection() {
-        let (vault_file, audit_file) = get_test_files();
+        let (vault_file, counter_file,audit_file) = get_test_files();
         let passphrase = SecureString::new("test".to_string());
         
         let mut vault = HashMap::new();
         vault.insert("key".to_string(), SecureString::new("value".to_string()));
-        save_vault(&vault_file, &vault, &passphrase).unwrap();
+        save_vault(&vault_file, &counter_file,&vault, &passphrase).unwrap();
         
         // Tamper with ciphertext
         let mut data = fs::read(&vault_file).unwrap();
@@ -928,7 +929,7 @@ mod tests {
         }
         fs::write(&vault_file, data).unwrap();
         
-        let result = load_vault(&vault_file, &passphrase);
+        let result = load_vault(&vault_file, &counter_file, &passphrase);
         assert!(result.is_err());
         
         cleanup(&vault_file, &audit_file);
@@ -936,7 +937,7 @@ mod tests {
 
     #[test]
     fn test_audit_log_with_binary_data() {
-        let (vault_file, audit_file) = get_test_files();
+        let (vault_file, _counter_file, audit_file) = get_test_files();
         let passphrase = SecureString::new("test".to_string());
         let audit_key = derive_audit_key(&passphrase).unwrap();
         
@@ -953,7 +954,7 @@ mod tests {
 
     #[test]
     fn test_passphrase_change_with_audit_rekey() {
-        let (vault_file, audit_file) = get_test_files();
+        let (vault_file, _counter_file,audit_file) = get_test_files();
         let old_pass = SecureString::new("old".to_string());
         let new_pass = SecureString::new("new".to_string());
         
@@ -992,17 +993,17 @@ mod tests {
 
     #[test]
     fn test_invalid_key_format() {
-        let (vault_file, audit_file) = get_test_files();
+        let (vault_file, counter_file,audit_file) = get_test_files();
         let passphrase = SecureString::new("test".to_string());
         
         let mut vault = HashMap::new();
         vault.insert("key:colon".to_string(), SecureString::new("val".to_string()));
-        let result = save_vault(&vault_file, &vault, &passphrase);
+        let result = save_vault(&vault_file, &counter_file, &vault, &passphrase);
         assert!(result.is_err());
         
         vault.clear();
         vault.insert("key".to_string(), SecureString::new("val\nline".to_string()));
-        let result = save_vault(&vault_file, &vault, &passphrase);
+        let result = save_vault(&vault_file, &counter_file,&vault, &passphrase);
         assert!(result.is_err());
         
         cleanup(&vault_file, &audit_file);

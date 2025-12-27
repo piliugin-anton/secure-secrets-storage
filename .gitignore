@@ -1,7 +1,7 @@
 /target
 vault.enc
 vault.counter
-audit.log
+vault_audit.log
 test_vault_*.enc
 test_audit_*.log
 test_vault_*.counter
