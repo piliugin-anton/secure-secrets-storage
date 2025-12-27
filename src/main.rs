@@ -1160,16 +1160,26 @@ fn export_vault_plaintext(
     vault: &HashMap<String, SecureString>,
     export_path: &str,
 ) -> io::Result<()> {
+    export_vault_plaintext_internal(vault, export_path, false)
+}
+
+fn export_vault_plaintext_internal(
+    vault: &HashMap<String, SecureString>,
+    export_path: &str,
+    skip_confirmation: bool,
+) -> io::Result<()> {
     use std::io::Write;
     
-    // Prompt for confirmation
-    println!("\n⚠️  SECURITY WARNING ⚠️");
-    println!("This will export ALL secrets in PLAINTEXT to a JSON file.");
-    println!("Anyone who can read this file will see all your secrets!");
-    let confirm = prompt_password("Type 'EXPORT' to confirm: ")?;
-    if confirm.trim() != "EXPORT" {
-        println!("Export cancelled.");
-        return Ok(());
+    // Prompt for confirmation (unless testing)
+    if !skip_confirmation {
+        println!("\n⚠️  SECURITY WARNING ⚠️");
+        println!("This will export ALL secrets in PLAINTEXT to a JSON file.");
+        println!("Anyone who can read this file will see all your secrets!");
+        let confirm = prompt_password("Type 'EXPORT' to confirm: ")?;
+        if confirm.trim() != "EXPORT" {
+            println!("Export cancelled.");
+            return Ok(());
+        }
     }
     
     let mut json = String::from("{\n");
@@ -1577,8 +1587,8 @@ mod backup_tests {
     #[test]
     fn test_export_and_import_plaintext() {
         let (vault_file, counter_file, audit_file, backup_file, export_file) = get_test_files();
-        let passphrase = SecureString::new("test".to_string());
-        let counter_key = derive_counter_key(&passphrase).unwrap();
+        //let passphrase = SecureString::new("test".to_string());
+        //let counter_key = derive_counter_key(&passphrase).unwrap();
         
         // Create vault with secrets
         let mut vault = HashMap::new();
@@ -1586,8 +1596,8 @@ mod backup_tests {
         vault.insert("api_key".to_string(), SecureString::new("key_xyz789".to_string()));
         vault.insert("password".to_string(), SecureString::new("super_secret".to_string()));
         
-        // Export to plaintext
-        export_vault_plaintext(&vault, &export_file).unwrap();
+        // Export to plaintext (skip confirmation in tests)
+        export_vault_plaintext_internal(&vault, &export_file, true).unwrap();
         assert!(Path::new(&export_file).exists(), "Export file should exist");
         
         // Read and verify export format
@@ -1708,7 +1718,8 @@ mod backup_tests {
         vault.insert("key_with_quote".to_string(), SecureString::new("value\"with\"quotes".to_string()));
         vault.insert("key_with_backslash".to_string(), SecureString::new("value\\with\\backslash".to_string()));
         
-        export_vault_plaintext(&vault, &export_file).unwrap();
+        // Skip confirmation in tests
+        export_vault_plaintext_internal(&vault, &export_file, true).unwrap();
         
         // Read export and verify escaping
         let export_content = fs::read_to_string(&export_file).unwrap();
