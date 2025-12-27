@@ -276,7 +276,7 @@ fn main() -> io::Result<()> {
 }
 
 fn print_usage() {
-    println!("Secure Password Vault v{VERSION}.0");
+    println!("Secure Secrets Storage v{VERSION}.0");
     println!("\nUsage:");
     println!("  add <key>           - Add a secret");
     println!("  get <key>           - Get a secret");
