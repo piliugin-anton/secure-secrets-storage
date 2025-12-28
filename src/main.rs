@@ -550,7 +550,7 @@ fn secure_memory() -> io::Result<()> {
 fn derive_vault_keys(
     passphrase: &SecureString,
     salt: &[u8],
-) -> io::Result<(SecureBytes, SecureBytes)> {
+) -> Result<(SecureBytes, SecureBytes)> {
     // Use Argon2id for password-based key derivation
     let argon2 = Argon2::new(
         Algorithm::Argon2id,
@@ -561,13 +561,13 @@ fn derive_vault_keys(
             4,          // 4 parallel threads
             Some(64),   // 64-byte output
         )
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Argon2 params: {}", e)))?,
+        .map_err(|e| VaultError::Argon2(format!("Argon2 params: {}", e).into()))?,
     );
 
     let mut master_key = Zeroizing::new(vec![0u8; 64]);
     argon2
         .hash_password_into(passphrase.as_bytes(), salt, &mut master_key)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Argon2 failed: {}", e)))?;
+        .map_err(|e| VaultError::Argon2(format!("Argon2 failed: {}", e).into()))?;
 
     // Use HKDF to derive separate keys with domain separation
     let hkdf = Hkdf::<Sha256>::new(Some(salt), &master_key);
@@ -576,16 +576,16 @@ fn derive_vault_keys(
     let mut auth_key = vec![0u8; KEY_SIZE];
 
     hkdf.expand(b"vault-encryption-key-v2", &mut enc_key)
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "HKDF expand failed"))?;
+        .map_err(|_| VaultError::CryptoError("HKDF expand failed".into()))?;
 
     hkdf.expand(b"vault-authentication-key-v2", &mut auth_key)
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "HKDF expand failed"))?;
+        .map_err(|_| VaultError::CryptoError("HKDF expand failed".into()))?;
 
     Ok((SecureBytes::new(enc_key), SecureBytes::new(auth_key)))
 }
 
 // Derive audit log encryption key
-fn derive_audit_key(passphrase: &SecureString) -> io::Result<SecureBytes> {
+fn derive_audit_key(passphrase: &SecureString) -> Result<SecureBytes> {
     // Use a fixed salt for audit key (acceptable since it's derived from passphrase)
     let audit_salt = b"vault-audit-log-salt-v2-do-not-change";
 
@@ -593,41 +593,31 @@ fn derive_audit_key(passphrase: &SecureString) -> io::Result<SecureBytes> {
         Algorithm::Argon2id,
         Version::V0x13,
         Params::new(64 * 1024, 2, 2, Some(32))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Argon2 params: {}", e)))?,
+            .map_err(|e| VaultError::Argon2(format!("Argon2 params: {}", e).into()))?,
     );
 
     let mut audit_key = vec![0u8; KEY_SIZE];
     argon2
         .hash_password_into(passphrase.as_bytes(), audit_salt, &mut audit_key)
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Audit key derivation failed: {}", e),
-            )
-        })?;
+        .map_err(|e| VaultError::Argon2(format!("Audit key derivation failed: {}", e).into()))?;
 
     Ok(SecureBytes::new(audit_key))
 }
 
-fn derive_counter_key(passphrase: &SecureString) -> io::Result<SecureBytes> {
+fn derive_counter_key(passphrase: &SecureString) -> Result<SecureBytes> {
     let counter_salt = b"vault-counter-salt-v2-do-not-change";
 
     let argon2 = Argon2::new(
         Algorithm::Argon2id,
         Version::V0x13,
         Params::new(64 * 1024, 2, 2, Some(32))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Argon2 params: {}", e)))?,
+            .map_err(|e| VaultError::Argon2(format!("Argon2 params: {}", e).into()))?,
     );
 
     let mut counter_key = vec![0u8; KEY_SIZE];
     argon2
         .hash_password_into(passphrase.as_bytes(), counter_salt, &mut counter_key)
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Counter key derivation failed: {}", e),
-            )
-        })?;
+        .map_err(|e| VaultError::Argon2(format!("Counter key derivation failed: {}", e).into()))?;
 
     Ok(SecureBytes::new(counter_key))
 }
@@ -663,30 +653,23 @@ fn lock_file_exclusive(_file: &File) -> io::Result<()> {
     Ok(()) // No-op on non-Unix platforms
 }
 
-fn serialize_vault(vault: &HashMap<String, SecureString>) -> io::Result<String> {
+fn serialize_vault(vault: &HashMap<String, SecureString>) -> Result<String> {
     let mut data = String::new();
 
     for (key, value) in vault {
         // Validate key
         if key.is_empty() || key.contains(':') || key.contains('\n') {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid key '{}': keys cannot be empty or contain ':' or newlines",
-                    key
-                ),
-            ));
+            return Err(VaultError::InvalidKeyFormat(format!(
+                "Invalid key '{}': keys cannot be empty or contain ':' or newlines",
+                key).into()));
         }
 
         // Validate value
         if value.as_str().contains('\n') {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Value for key '{}' contains invalid character '\\n' (used as line separator)",
-                    key
-                ),
-            ));
+            return Err(VaultError::InvalidDataFormat(format!(
+                "Value for key '{}' contains invalid character '\\n' (used as line separator)",
+                key
+            ).into()));
         }
 
         // Escape special characters in value
@@ -703,7 +686,7 @@ fn serialize_vault(vault: &HashMap<String, SecureString>) -> io::Result<String> 
 }
 
 /// Deserialize vault from plaintext format after decryption
-fn deserialize_vault(plaintext: &str) -> io::Result<HashMap<String, SecureString>> {
+fn deserialize_vault(plaintext: &str) -> Result<HashMap<String, SecureString>> {
     let mut vault = HashMap::new();
 
     for (line_num, line) in plaintext.lines().enumerate() {
@@ -714,23 +697,17 @@ fn deserialize_vault(plaintext: &str) -> io::Result<HashMap<String, SecureString
         match line.split_once(':') {
             Some((key, value)) => {
                 if key.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("Line {}: Empty key not allowed", line_num + 1),
-                    ));
+                    return Err(VaultError::InvalidDataFormat(format!("Line {}: Empty key not allowed", line_num + 1).into()));
                 }
 
                 vault.insert(key.to_string(), SecureString::new(value.to_string()));
             }
             None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "Line {}: Invalid format - missing ':' delimiter in line: '{}'",
-                        line_num + 1,
-                        line
-                    ),
-                ));
+                return Err(VaultError::InvalidDataFormat(format!(
+                    "Line {}: Invalid format - missing ':' delimiter in line: '{}'",
+                    line_num + 1,
+                    line
+                ).into()));
             }
         }
     }
@@ -748,13 +725,13 @@ fn deserialize_vault(plaintext: &str) -> io::Result<HashMap<String, SecureString
 fn decrypt_vault(
     vault_data: &VaultFileData,
     passphrase: &SecureString,
-) -> io::Result<HashMap<String, SecureString>> {
+) -> Result<HashMap<String, SecureString>> {
     // Derive encryption and authentication keys
     let (enc_key, auth_key) = derive_vault_keys(passphrase, &vault_data.salt)?;
 
     // Verify HMAC over entire vault structure
     let mut mac = <HmacSha256 as Mac>::new_from_slice(auth_key.as_slice())
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "HMAC init failed"))?;
+        .map_err(|_| VaultError::Hmac("HMAC init failed".into()))?;
 
     mac.update(&[vault_data.version]);
     mac.update(&vault_data.counter.to_le_bytes());
@@ -762,12 +739,7 @@ fn decrypt_vault(
     mac.update(&vault_data.nonce_bytes);
     mac.update(&vault_data.ciphertext);
 
-    mac.verify_slice(&vault_data.stored_hmac).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Authentication failed - wrong passphrase, corrupted vault, or tampered data",
-        )
-    })?;
+    mac.verify_slice(&vault_data.stored_hmac).map_err(|_| VaultError::AuthenticationFailed)?;
 
     // Decrypt ciphertext
     let cipher = XChaCha20Poly1305::new(enc_key.as_slice().into());
@@ -775,20 +747,10 @@ fn decrypt_vault(
 
     let plaintext = cipher
         .decrypt(nonce, vault_data.ciphertext.as_ref())
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Decryption failed - data may be corrupted",
-            )
-        })?;
+        .map_err(|_| VaultError::CryptoError("Decryption failed - data may be corrupted".into()))?;
 
     // Convert plaintext to UTF-8 string
-    let plaintext_str = String::from_utf8(plaintext).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Invalid UTF-8 in decrypted vault data",
-        )
-    })?;
+    let plaintext_str = String::from_utf8(plaintext).map_err(|_| VaultError::InvalidDataFormat("Invalid UTF-8 in decrypted vault data".into()))?;
 
     // Parse key:value format with unescaping
     let vault = deserialize_vault(&plaintext_str)?;
@@ -803,7 +765,7 @@ fn save_vault(
     vault: &HashMap<String, SecureString>,
     passphrase: &SecureString,
     counter_key: &SecureBytes,
-) -> io::Result<u64> {
+) -> Result<u64> {
     info!(
         vault = %vault_file,
         secrets_count = vault.len(),
@@ -827,7 +789,7 @@ fn save_vault(
         .open(counter_file)
         .map_err(|e| {
             error!(file = %counter_file, error = %e, "Failed to open counter file");
-            e
+            VaultError::Io(e)
         })?;
 
     lock_file_exclusive(&counter_file_handle).map_err(|e| {
@@ -850,7 +812,7 @@ fn save_vault(
     let temp_file = format!("{}.tmp.{}", vault_file, new_counter);
 
     // Closure to handle the save operation with proper cleanup
-    let save_result = (|| -> io::Result<()> {
+    let save_result = (|| -> Result<()> {
         // Generate random values
         let mut rng = OsRng;
         let mut salt = vec![0u8; SALT_SIZE];
@@ -866,11 +828,11 @@ fn save_vault(
         let nonce = XNonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
             .encrypt(nonce, data.as_bytes())
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Encryption failed"))?;
+            .map_err(|_| VaultError::CryptoError("Encryption failed".into()))?;
 
         // HMAC
         let mut mac = <HmacSha256 as Mac>::new_from_slice(auth_key.as_slice())
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "HMAC init failed"))?;
+            .map_err(|_| VaultError::Hmac("HMAC init failed".into()))?;
         mac.update(&[VERSION]);
         mac.update(&new_counter.to_le_bytes());
         mac.update(&salt);
@@ -933,7 +895,7 @@ fn save_vault(
                     // Rename failed - clean up temp file
                     error!(error = %e, "Atomic rename failed, cleaning up");
                     let _ = std::fs::remove_file(&temp_file);
-                    Err(e)
+                    Err(VaultError::Io(e))
                 }
             }
         }
@@ -1649,12 +1611,9 @@ fn restore_vault(
     counter_file: &str,
     audit_file: &str,
     passphrase: &SecureString,
-) -> io::Result<()> {
+) -> Result<()> {
     if !Path::new(backup_path).exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "Backup file not found",
-        ));
+        return Err(VaultError::InvalidDataFormat("Backup file not found".into()));
     }
 
     // Prompt for confirmation
@@ -1682,29 +1641,20 @@ fn restore_vault(
     let mut magic = [0u8; 8];
     file.read_exact(&mut magic)?;
     if &magic != b"VAULTBAK" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Invalid backup file format",
-        ));
+        return Err(VaultError::InvalidDataFormat("Invalid backup file format".into()));
     }
 
     let mut version = [0u8; 1];
     file.read_exact(&mut version)?;
     if version[0] != VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Unsupported backup version: {}", version[0]),
-        ));
+        return Err(VaultError::InvalidDataFormat(format!("Unsupported backup version: {}", version[0]).into()));
     }
 
     let mut backup_content = Vec::new();
     file.read_to_end(&mut backup_content)?;
 
     if backup_content.len() < 32 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Backup file too short",
-        ));
+        return Err(VaultError::InvalidDataFormat("Backup file too short".into()));
     }
 
     let content_len = backup_content.len() - 32;
@@ -1939,18 +1889,13 @@ fn derive_backup_key(passphrase: &SecureString) -> io::Result<SecureBytes> {
         Algorithm::Argon2id,
         Version::V0x13,
         Params::new(64 * 1024, 2, 2, Some(32))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Argon2 params: {}", e)))?,
+            .map_err(|e| VaultError::Argon2(format!("Argon2 params: {}", e).into()))?,
     );
 
     let mut backup_key = vec![0u8; KEY_SIZE];
     argon2
         .hash_password_into(passphrase.as_bytes(), backup_salt, &mut backup_key)
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Backup key derivation failed: {}", e),
-            )
-        })?;
+        .map_err(|e| VaultError::Argon2(format!("Backup key derivation failed: {}", e).into()))?;
 
     Ok(SecureBytes::new(backup_key))
 }
