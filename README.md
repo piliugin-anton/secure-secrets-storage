@@ -1,5 +1,5 @@
 # Secure Secrets Storage (AI vibe-coding demo)
-## DO NOT USE IT IN PRODUCTION
+## ⚠️⚠️⚠️ DO NOT USE IT IN PRODUCTION ⚠️⚠️⚠️
 
 A cryptographically secure, file-based secrets manager with comprehensive security features including rollback attack protection, encrypted audit logging, and key rotation capabilities.
 
