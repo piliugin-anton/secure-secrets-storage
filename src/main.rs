@@ -17,27 +17,29 @@ use std::{collections::HashMap, io::Seek};
 use zeroize::Zeroizing;
 
 #[cfg(unix)]
-use std::os::unix::io::AsRawFd;
+use std::fs::Permissions;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
-use std::fs::Permissions;
+use std::os::unix::io::AsRawFd;
 
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 #[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+#[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]
 use winapi::um::fileapi::{LockFileEx, UnlockFile};
 #[cfg(windows)]
-use winapi::um::winnt::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
-#[cfg(windows)]
-use winapi::um::winnt::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION};
-#[cfg(windows)]
 use winapi::um::securitybaseapi::SetFileSecurityW;
+#[cfg(windows)]
+use winapi::um::winnt::{
+    DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+};
+#[cfg(windows)]
+use winapi::um::winnt::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
 
 /// Acquire shared (read) lock on file - cross-platform
 #[cfg(unix)]
@@ -49,7 +51,7 @@ fn lock_file_shared(file: &File) -> io::Result<()> {
         if err.kind() == io::ErrorKind::WouldBlock {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "File is locked by another process"
+                "File is locked by another process",
             ));
         }
         return Err(err);
@@ -62,7 +64,7 @@ fn lock_file_shared(file: &File) -> io::Result<()> {
 fn lock_file_shared(file: &File) -> io::Result<()> {
     let handle = file.as_raw_handle();
     let mut overlapped: winapi::um::minwinbase::OVERLAPPED = unsafe { std::mem::zeroed() };
-    
+
     let result = unsafe {
         LockFileEx(
             handle as _,
@@ -73,15 +75,15 @@ fn lock_file_shared(file: &File) -> io::Result<()> {
             &mut overlapped,
         )
     };
-    
+
     if result == 0 {
         let err = io::Error::last_os_error();
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
-            format!("Failed to acquire shared lock: {}", err)
+            format!("Failed to acquire shared lock: {}", err),
         ));
     }
-    
+
     debug!("Acquired shared lock on file (Windows)");
     Ok(())
 }
@@ -102,7 +104,7 @@ fn lock_file_exclusive(file: &File) -> io::Result<()> {
         if err.kind() == io::ErrorKind::WouldBlock {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "File is locked by another process - retry operation"
+                "File is locked by another process - retry operation",
             ));
         }
         return Err(err);
@@ -115,7 +117,7 @@ fn lock_file_exclusive(file: &File) -> io::Result<()> {
 fn lock_file_exclusive(file: &File) -> io::Result<()> {
     let handle = file.as_raw_handle();
     let mut overlapped: winapi::um::minwinbase::OVERLAPPED = unsafe { std::mem::zeroed() };
-    
+
     let result = unsafe {
         LockFileEx(
             handle as _,
@@ -126,15 +128,15 @@ fn lock_file_exclusive(file: &File) -> io::Result<()> {
             &mut overlapped,
         )
     };
-    
+
     if result == 0 {
         let err = io::Error::last_os_error();
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
-            format!("Failed to acquire exclusive lock: {}", err)
+            format!("Failed to acquire exclusive lock: {}", err),
         ));
     }
-    
+
     debug!("Acquired exclusive lock on file (Windows)");
     Ok(())
 }
@@ -149,20 +151,12 @@ fn lock_file_exclusive(_file: &File) -> io::Result<()> {
 #[cfg(windows)]
 fn unlock_file(file: &File) -> io::Result<()> {
     let handle = file.as_raw_handle();
-    let result = unsafe {
-        UnlockFile(
-            handle as _,
-            0,
-            0,
-            u32::MAX,
-            u32::MAX,
-        )
-    };
-    
+    let result = unsafe { UnlockFile(handle as _, 0, 0, u32::MAX, u32::MAX) };
+
     if result == 0 {
         return Err(io::Error::last_os_error());
     }
-    
+
     debug!("Released file lock (Windows)");
     Ok(())
 }
@@ -181,45 +175,47 @@ fn unlock_file(_file: &File) -> io::Result<()> {
 #[cfg(unix)]
 fn set_secure_permissions(path: &Path) -> io::Result<()> {
     std::fs::set_permissions(path, Permissions::from_mode(0o600))?;
-    
+
     let metadata = std::fs::metadata(path)?;
     let mode = metadata.permissions().mode() & 0o777;
-    
+
     if mode != 0o600 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("Failed to set secure permissions: got {:o}, expected 0600", mode)
+            format!(
+                "Failed to set secure permissions: got {:o}, expected 0600",
+                mode
+            ),
         ));
     }
-    
+
     debug!(path = ?path, "Set secure permissions (Unix 0600)");
     Ok(())
 }
 
 #[cfg(windows)]
 fn set_secure_permissions(path: &Path) -> io::Result<()> {
-    
-    
     // Get current user SID
-    let path_wide: Vec<u16> = path.as_os_str()
+    let path_wide: Vec<u16> = path
+        .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    
+
     // Set ACL to current user only (remove all other access)
     // This is a simplified version - full implementation would use
     // GetTokenInformation, AllocateAndInitializeSid, SetEntriesInAcl
-    
+
     // For now, use basic attribute setting
     use std::os::windows::fs::OpenOptionsExt;
     use winapi::um::winbase::FILE_ATTRIBUTE_HIDDEN;
-    
+
     // Set hidden + system attributes for additional obscurity
     let file = std::fs::OpenOptions::new()
         .write(true)
         .attributes(FILE_ATTRIBUTE_HIDDEN)
         .open(path)?;
-    
+
     debug!(path = ?path, "Set secure permissions (Windows hidden)");
     Ok(())
 }
@@ -234,10 +230,10 @@ fn set_secure_permissions(path: &Path) -> io::Result<()> {
 #[cfg(unix)]
 fn verify_secure_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    
+
     let metadata = std::fs::metadata(path)?;
     let mode = metadata.permissions().mode() & 0o777;
-    
+
     if mode != 0o600 {
         error!(
             path = ?path,
@@ -246,7 +242,7 @@ fn verify_secure_permissions(path: &Path) -> Result<()> {
         );
         return Err(VaultError::InsecurePermissions { mode });
     }
-    
+
     Ok(())
 }
 
@@ -255,7 +251,7 @@ fn verify_secure_permissions(path: &Path) -> Result<()> {
     // On Windows, verify file is not accessible to other users
     // This requires checking ACLs which is complex
     // For now, just verify file exists and is readable by current user
-    
+
     let _metadata = std::fs::metadata(path)?;
     // TODO: Implement full ACL verification
     warn!(path = ?path, "Full permission verification not yet implemented on Windows");
@@ -504,12 +500,12 @@ enum AuditOperation {
     SecretWrite,
     SecretDelete,
     PassphraseChange,
-    KeyRotation,      // NEW
+    KeyRotation,       // NEW
     EmergencyRotation, // NEW
     AuditView,
     BackupCreated,
     VaultRestored,
-    PermissionCheck,   // NEW
+    PermissionCheck, // NEW
 }
 
 impl AuditOperation {
@@ -532,7 +528,7 @@ impl AuditOperation {
 
 fn main() -> Result<()> {
     init_logging();
-    
+
     info!("Secure Secrets Storage starting");
 
     // Secure memory before handling any secrets
@@ -567,7 +563,7 @@ fn main() -> Result<()> {
                 );
 
                 (vault, counter)
-            },
+            }
             Err(VaultError::AuthenticationFailed) => {
                 error!("Wrong passphrase provided");
                 return Err(VaultError::AuthenticationFailed.into());
@@ -726,30 +722,21 @@ fn main() -> Result<()> {
             info!("Secrets imported successfully");
         }
         "rotate-keys" if args.len() == 2 => {
-        rotate_encryption_keys(
-            VAULT_FILE,
-            COUNTER_FILE,
-            AUDIT_FILE,
-            &passphrase,
-        )?;
-    }
-    
-    "emergency-rotate" if args.len() == 2 => {
-        emergency_key_rotation(
-            VAULT_FILE,
-            COUNTER_FILE,
-            AUDIT_FILE,
-            &passphrase,
-        )?;
-    }
-    
-    "check-permissions" if args.len() == 2 => {
-        check_and_fix_permissions(
-            VAULT_FILE,
-            COUNTER_FILE,
-            AUDIT_FILE,
-        )?;
-    }
+            rotate_encryption_keys(VAULT_FILE, COUNTER_FILE, AUDIT_FILE, &passphrase)?;
+            log_audit(AUDIT_FILE, AuditOperation::KeyRotation, true, &audit_key)?;
+            info!("Encryption keys rotated successfully");
+        }
+
+        "emergency-rotate" if args.len() == 2 => {
+            emergency_key_rotation(VAULT_FILE, COUNTER_FILE, AUDIT_FILE, &passphrase)?;
+            log_audit(AUDIT_FILE, AuditOperation::EmergencyRotation, true, &audit_key)?;
+            info!("Emergency keys rotated successfully");
+        }
+
+        "check-permissions" if args.len() == 2 => {
+            check_and_fix_permissions(VAULT_FILE, COUNTER_FILE, AUDIT_FILE)?;
+            log_audit(AUDIT_FILE, AuditOperation::PermissionCheck, true, &audit_key)?;
+        }
         _ => {
             error!("Invalid command or arguments.");
             print_usage();
@@ -786,12 +773,11 @@ fn print_usage() {
 }
 
 pub fn init_logging() {
-    use tracing_subscriber::{fmt, filter::EnvFilter};
+    use tracing_subscriber::{filter::EnvFilter, fmt};
 
     fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info"))
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_target(false)
         .with_thread_ids(false)
@@ -832,10 +818,7 @@ fn secure_memory() -> io::Result<()> {
 }
 
 // Derive encryption and authentication keys using HKDF
-fn derive_vault_keys(
-    passphrase: &SecureString,
-    salt: &[u8],
-) -> Result<(SecureBytes, SecureBytes)> {
+fn derive_vault_keys(passphrase: &SecureString, salt: &[u8]) -> Result<(SecureBytes, SecureBytes)> {
     // Use Argon2id for password-based key derivation
     let argon2 = Argon2::new(
         Algorithm::Argon2id,
@@ -913,17 +896,24 @@ fn serialize_vault(vault: &HashMap<String, SecureString>) -> Result<String> {
     for (key, value) in vault {
         // Validate key
         if key.is_empty() || key.contains(':') || key.contains('\n') {
-            return Err(VaultError::InvalidKeyFormat(format!(
-                "Invalid key '{}': keys cannot be empty or contain ':' or newlines",
-                key).into()));
+            return Err(VaultError::InvalidKeyFormat(
+                format!(
+                    "Invalid key '{}': keys cannot be empty or contain ':' or newlines",
+                    key
+                )
+                .into(),
+            ));
         }
 
         // Validate value
         if value.as_str().contains('\n') {
-            return Err(VaultError::InvalidDataFormat(format!(
-                "Value for key '{}' contains invalid character '\\n' (used as line separator)",
-                key
-            ).into()));
+            return Err(VaultError::InvalidDataFormat(
+                format!(
+                    "Value for key '{}' contains invalid character '\\n' (used as line separator)",
+                    key
+                )
+                .into(),
+            ));
         }
 
         // Escape special characters in value
@@ -951,17 +941,22 @@ fn deserialize_vault(plaintext: &str) -> Result<HashMap<String, SecureString>> {
         match line.split_once(':') {
             Some((key, value)) => {
                 if key.is_empty() {
-                    return Err(VaultError::InvalidDataFormat(format!("Line {}: Empty key not allowed", line_num + 1).into()));
+                    return Err(VaultError::InvalidDataFormat(
+                        format!("Line {}: Empty key not allowed", line_num + 1).into(),
+                    ));
                 }
 
                 vault.insert(key.to_string(), SecureString::new(value.to_string()));
             }
             None => {
-                return Err(VaultError::InvalidDataFormat(format!(
-                    "Line {}: Invalid format - missing ':' delimiter in line: '{}'",
-                    line_num + 1,
-                    line
-                ).into()));
+                return Err(VaultError::InvalidDataFormat(
+                    format!(
+                        "Line {}: Invalid format - missing ':' delimiter in line: '{}'",
+                        line_num + 1,
+                        line
+                    )
+                    .into(),
+                ));
             }
         }
     }
@@ -993,7 +988,8 @@ fn decrypt_vault(
     mac.update(&vault_data.nonce_bytes);
     mac.update(&vault_data.ciphertext);
 
-    mac.verify_slice(&vault_data.stored_hmac).map_err(|_| VaultError::AuthenticationFailed)?;
+    mac.verify_slice(&vault_data.stored_hmac)
+        .map_err(|_| VaultError::AuthenticationFailed)?;
 
     // Decrypt ciphertext
     let cipher = XChaCha20Poly1305::new(enc_key.as_slice().into());
@@ -1004,7 +1000,9 @@ fn decrypt_vault(
         .map_err(|_| VaultError::CryptoError("Decryption failed - data may be corrupted".into()))?;
 
     // Convert plaintext to UTF-8 string
-    let plaintext_str = String::from_utf8(plaintext).map_err(|_| VaultError::InvalidDataFormat("Invalid UTF-8 in decrypted vault data".into()))?;
+    let plaintext_str = String::from_utf8(plaintext).map_err(|_| {
+        VaultError::InvalidDataFormat("Invalid UTF-8 in decrypted vault data".into())
+    })?;
 
     // Parse key:value format with unescaping
     let vault = deserialize_vault(&plaintext_str)?;
@@ -1127,7 +1125,12 @@ fn save_vault(
                 Ok(()) => {
                     set_secure_permissions(Path::new(vault_file))?;
                     // Update counter only after successful vault write
-                    write_counter_locked(&counter_file,&counter_file_handle, new_counter, counter_key)?;
+                    write_counter_locked(
+                        &counter_file,
+                        &counter_file_handle,
+                        new_counter,
+                        counter_key,
+                    )?;
 
                     #[cfg(unix)]
                     {
@@ -1242,7 +1245,8 @@ fn load_vault(
         return Err(VaultError::RollbackDetected {
             vault: vault_counter,
             stored: stored_counter,
-        }.into());
+        }
+        .into());
     }
 
     // STEP 7: Decrypt and authenticate vault
@@ -1258,7 +1262,12 @@ fn load_vault(
             new = vault_counter,
             "Updating stored counter to match vault"
         );
-        write_counter_locked(&counter_file, &counter_file_handle, vault_counter, counter_key)?;
+        write_counter_locked(
+            &counter_file,
+            &counter_file_handle,
+            vault_counter,
+            counter_key,
+        )?;
     }
 
     // Locks released
@@ -1511,7 +1520,7 @@ fn rekey_counter(
             let handle = OpenOptions::new().read(true).open(counter_file)?;
 
             lock_file_shared(&handle)?;
-            read_counter_locked(&counter_file,&handle, old_key)?
+            read_counter_locked(&counter_file, &handle, old_key)?
         }; // Lock released
 
         // Write to temp file with new key
@@ -1526,7 +1535,7 @@ fn rekey_counter(
             lock_file_exclusive(&temp_handle)?;
 
             // Write with new key
-            write_counter_locked(&counter_file,&temp_handle, counter_value, new_key)?;
+            write_counter_locked(&counter_file, &temp_handle, counter_value, new_key)?;
 
             // Verify immediately
             temp_handle.seek(io::SeekFrom::Start(0))?;
@@ -1592,9 +1601,7 @@ fn read_counter_locked(counter_file: &str, file: &File, auth_key: &SecureBytes) 
             metadata.len(),
             COUNTER_SIZE + 32
         );
-        error!(
-            message = message,
-        );
+        error!(message = message,);
 
         return Err(VaultError::InvalidDataFormat(message));
     }
@@ -1698,7 +1705,12 @@ fn read_vault_counter_from_file(file: &File) -> io::Result<(u64, VaultFileData)>
 /// The counter is written with HMAC authentication to prevent tampering.
 ///
 /// Format: [8 bytes counter][32 bytes HMAC-SHA256(counter)]
-fn write_counter_locked(counter_file: &str, mut file: &File, counter: u64, auth_key: &SecureBytes) -> io::Result<()> {
+fn write_counter_locked(
+    counter_file: &str,
+    mut file: &File,
+    counter: u64,
+    auth_key: &SecureBytes,
+) -> io::Result<()> {
     let counter_bytes = counter.to_le_bytes();
 
     // Compute HMAC over counter value
@@ -1809,7 +1821,7 @@ fn backup_vault(
     file.write_all(&hmac_bytes)?;
     file.sync_all()?;
 
-    set_secure_permissions(Path::new(&temp))?; 
+    set_secure_permissions(Path::new(&temp))?;
 
     drop(file);
     std::fs::rename(&temp, backup_path)?;
@@ -1832,7 +1844,9 @@ fn restore_vault(
     passphrase: &SecureString,
 ) -> Result<()> {
     if !Path::new(backup_path).exists() {
-        return Err(VaultError::InvalidDataFormat("Backup file not found".into()));
+        return Err(VaultError::InvalidDataFormat(
+            "Backup file not found".into(),
+        ));
     }
 
     // Prompt for confirmation
@@ -1860,20 +1874,26 @@ fn restore_vault(
     let mut magic = [0u8; 8];
     file.read_exact(&mut magic)?;
     if &magic != b"VAULTBAK" {
-        return Err(VaultError::InvalidDataFormat("Invalid backup file format".into()));
+        return Err(VaultError::InvalidDataFormat(
+            "Invalid backup file format".into(),
+        ));
     }
 
     let mut version = [0u8; 1];
     file.read_exact(&mut version)?;
     if version[0] != VERSION {
-        return Err(VaultError::InvalidDataFormat(format!("Unsupported backup version: {}", version[0]).into()));
+        return Err(VaultError::InvalidDataFormat(
+            format!("Unsupported backup version: {}", version[0]).into(),
+        ));
     }
 
     let mut backup_content = Vec::new();
     file.read_to_end(&mut backup_content)?;
 
     if backup_content.len() < 32 {
-        return Err(VaultError::InvalidDataFormat("Backup file too short".into()));
+        return Err(VaultError::InvalidDataFormat(
+            "Backup file too short".into(),
+        ));
     }
 
     let content_len = backup_content.len() - 32;
@@ -1886,7 +1906,11 @@ fn restore_vault(
         .map_err(|_| VaultError::Hmac("HMAC init failed".into()))?;
     mac.update(content);
 
-    mac.verify_slice(stored_hmac).map_err(|_| VaultError::CorruptedVault("Backup verification failed - wrong passphrase or corrupted backup".into()))?;
+    mac.verify_slice(stored_hmac).map_err(|_| {
+        VaultError::CorruptedVault(
+            "Backup verification failed - wrong passphrase or corrupted backup".into(),
+        )
+    })?;
 
     // Parse backup content
     let mut cursor = 0;
@@ -2120,15 +2144,15 @@ fn derive_backup_key(passphrase: &SecureString) -> io::Result<SecureBytes> {
 fn get_vault_salt(vault_file: &str) -> Result<Vec<u8>> {
     let file = File::open(vault_file)?;
     let mut reader = BufReader::new(file);
-    
+
     // Skip version (1 byte) and counter (8 bytes)
     let mut skip = vec![0u8; 1 + 8];
     reader.read_exact(&mut skip)?;
-    
+
     // Read salt
     let mut salt = vec![0u8; SALT_SIZE];
     reader.read_exact(&mut salt)?;
-    
+
     Ok(salt)
 }
 
@@ -2142,7 +2166,7 @@ fn derive_audit_key_from_vault(
     let mut audit_salt = Vec::with_capacity(vault_salt.len() + 32);
     audit_salt.extend_from_slice(vault_salt);
     audit_salt.extend_from_slice(b"-vault-audit-key-derivation-v2");
-    
+
     let argon2 = Argon2::new(
         Algorithm::Argon2id,
         Version::V0x13,
@@ -2150,15 +2174,16 @@ fn derive_audit_key_from_vault(
             128 * 1024, // 128 MB memory
             3,          // 3 iterations
             4,          // 4 threads
-            Some(32)
-        ).map_err(|e| VaultError::Argon2(format!("Argon2 params: {}", e)))?,
+            Some(32),
+        )
+        .map_err(|e| VaultError::Argon2(format!("Argon2 params: {}", e)))?,
     );
-    
+
     let mut audit_key = vec![0u8; KEY_SIZE];
     argon2
         .hash_password_into(passphrase.as_bytes(), &audit_salt, &mut audit_key)
         .map_err(|e| VaultError::Argon2(format!("Audit key derivation: {}", e)))?;
-    
+
     Ok(SecureBytes::new(audit_key))
 }
 
@@ -2176,26 +2201,21 @@ fn rotate_encryption_keys(
 ) -> Result<()> {
     info!("Starting encryption key rotation");
     println!("⚙️  Rotating encryption keys (passphrase unchanged)...");
-    
+
     // 1. Load current vault
     let counter_key = derive_counter_key(passphrase)?;
-    let (vault, current_counter) = load_vault(
-        vault_file,
-        counter_file,
-        passphrase,
-        &counter_key
-    )?;
-    
+    let (vault, current_counter) = load_vault(vault_file, counter_file, passphrase, &counter_key)?;
+
     info!(
         secrets = vault.len(),
         counter = current_counter,
         "Vault loaded for key rotation"
     );
-    
+
     // 2. Create backup before rotation
     let backup_path = format!("{}.pre-rotation.{}", vault_file, current_counter);
     println!("📦 Creating safety backup: {}", backup_path);
-    
+
     backup_vault(
         vault_file,
         counter_file,
@@ -2203,39 +2223,33 @@ fn rotate_encryption_keys(
         &backup_path,
         passphrase,
     )?;
-    
+
     // 3. Save with new random salt (forces new encryption keys)
     println!("🔄 Re-encrypting with new keys...");
-    let new_counter = save_vault(
-        vault_file,
-        counter_file,
-        &vault,
-        passphrase,
-        &counter_key,
-    )?;
-    
+    let new_counter = save_vault(vault_file, counter_file, &vault, passphrase, &counter_key)?;
+
     // 4. Log audit event with new vault-specific key
     let new_salt = get_vault_salt(vault_file)?;
     let new_audit_key = derive_audit_key_from_vault(passphrase, &new_salt)?;
-    
+
     log_audit(
         audit_file,
         AuditOperation::KeyRotation,
         true,
         &new_audit_key,
     )?;
-    
+
     info!(
         old_counter = current_counter,
         new_counter = new_counter,
         "Key rotation completed successfully"
     );
-    
+
     println!("✅ Keys rotated successfully");
     println!("   All {} secrets re-encrypted with new keys", vault.len());
     println!("   Backup saved to: {}", backup_path);
     println!("   Counter: {} → {}", current_counter, new_counter);
-    
+
     Ok(())
 }
 
@@ -2248,63 +2262,54 @@ fn emergency_key_rotation(
 ) -> Result<()> {
     println!("🚨 EMERGENCY KEY ROTATION");
     println!("   This should only be used if you suspect key compromise");
-    
+
     let confirm = prompt_password("Type 'ROTATE' to confirm: ")?;
     if confirm.trim() != "ROTATE" {
         println!("Rotation cancelled");
         return Ok(());
     }
-    
+
     // Perform rotation
-    rotate_encryption_keys(
-        vault_file,
-        counter_file,
-        audit_file,
-        passphrase,
-    )?;
-    
+    rotate_encryption_keys(vault_file, counter_file, audit_file, passphrase)?;
+
     // Additional verification
     println!("🔍 Verifying rotated vault...");
     let counter_key = derive_counter_key(passphrase)?;
     verify_vault(vault_file, counter_file, passphrase, &counter_key)?;
-    
+
     println!("✅ Emergency rotation complete and verified");
     println!("   Recommend changing passphrase next: change-passphrase");
-    
+
     Ok(())
 }
 
 /// Verify and fix file permissions for all vault files
-fn check_and_fix_permissions(
-    vault_file: &str,
-    counter_file: &str,
-    audit_file: &str,
-) -> Result<()> {
+fn check_and_fix_permissions(vault_file: &str, counter_file: &str, audit_file: &str) -> Result<()> {
     println!("🔒 Checking file permissions...");
-    
+
     let files = vec![
         (vault_file, "Vault file"),
         (counter_file, "Counter file"),
         (audit_file, "Audit log"),
     ];
-    
+
     let mut fixed = 0;
     let mut errors = Vec::new();
-    
+
     for (path, name) in files {
         if !Path::new(path).exists() {
             continue;
         }
-        
+
         print!("   {} ... ", name);
-        
+
         match verify_secure_permissions(Path::new(path)) {
             Ok(_) => {
                 println!("✅ OK");
             }
             Err(_e) => {
                 println!("⚠️  INSECURE");
-                
+
                 // Attempt to fix
                 match set_secure_permissions(Path::new(path)) {
                     Ok(_) => {
@@ -2320,11 +2325,11 @@ fn check_and_fix_permissions(
             }
         }
     }
-    
+
     if fixed > 0 {
         println!("\n✅ Fixed permissions on {} file(s)", fixed);
     }
-    
+
     if !errors.is_empty() {
         println!("\n❌ Errors encountered:");
         for err in &errors {
@@ -2332,7 +2337,7 @@ fn check_and_fix_permissions(
         }
         return Err(VaultError::InsecurePermissions { mode: 0 });
     }
-    
+
     println!("\n✅ All permissions secure");
     Ok(())
 }
@@ -2420,7 +2425,10 @@ mod tests {
         let result = load_vault(&vault_file, &counter_file, &wrong, &wrong_counter_key);
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), VaultError::AuthenticationFailed));
+        assert!(matches!(
+            result.unwrap_err(),
+            VaultError::AuthenticationFailed
+        ));
 
         cleanup(&vault_file, &counter_file, &audit_file);
     }
@@ -3172,36 +3180,36 @@ mod cross_platform_tests {
     use super::*;
     use std::fs::File;
     use tempfile::tempdir;
-    
+
     #[test]
     fn test_file_locking_exclusive() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.lock");
         let file1 = File::create(&path).unwrap();
-        
+
         // First lock should succeed
         assert!(lock_file_exclusive(&file1).is_ok());
-        
+
         // Second lock on same file should fail (would block)
         let file2 = File::open(&path).unwrap();
         let result = lock_file_exclusive(&file2);
-        
+
         #[cfg(any(unix, windows))]
         assert!(result.is_err());
-        
+
         drop(file1); // Release lock
     }
-    
+
     #[test]
     fn test_secure_permissions() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.secure");
         File::create(&path).unwrap();
-        
+
         // Should be able to set secure permissions
         let result = set_secure_permissions(&path);
         assert!(result.is_ok());
-        
+
         // Verify permissions were set correctly
         #[cfg(unix)]
         {
@@ -3209,49 +3217,47 @@ mod cross_platform_tests {
             assert!(result.is_ok());
         }
     }
-    
+
     #[test]
     fn test_key_rotation() {
         let dir = tempdir().unwrap();
         let vault_file = dir.path().join("vault.enc").to_str().unwrap().to_string();
         let counter_file = dir.path().join("counter").to_str().unwrap().to_string();
         let audit_file = dir.path().join("audit.log").to_str().unwrap().to_string();
-        
+
         let passphrase = SecureString::new("test_pass".to_string());
         let counter_key = derive_counter_key(&passphrase).unwrap();
-        
+
         // Create initial vault
         let mut vault = HashMap::new();
         vault.insert("key1".to_string(), SecureString::new("value1".to_string()));
         vault.insert("key2".to_string(), SecureString::new("value2".to_string()));
-        
-        save_vault(&vault_file, &counter_file, &vault, &passphrase, &counter_key).unwrap();
-        
+
+        save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
         // Get original salt
         let original_salt = get_vault_salt(&vault_file).unwrap();
-        
+
         // Rotate keys
-        rotate_encryption_keys(
-            &vault_file,
-            &counter_file,
-            &audit_file,
-            &passphrase,
-        ).unwrap();
-        
+        rotate_encryption_keys(&vault_file, &counter_file, &audit_file, &passphrase).unwrap();
+
         // Get new salt
         let new_salt = get_vault_salt(&vault_file).unwrap();
-        
+
         // Salts should be different
         assert_ne!(original_salt, new_salt, "Salt should change after rotation");
-        
+
         // Vault should still be readable with same passphrase
-        let (loaded, _) = load_vault(
-            &vault_file,
-            &counter_file,
-            &passphrase,
-            &counter_key
-        ).unwrap();
-        
+        let (loaded, _) =
+            load_vault(&vault_file, &counter_file, &passphrase, &counter_key).unwrap();
+
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.get("key1").unwrap().as_str(), "value1");
         assert_eq!(loaded.get("key2").unwrap().as_str(), "value2");
