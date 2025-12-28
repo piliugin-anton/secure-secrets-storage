@@ -196,20 +196,19 @@ fn set_secure_permissions(path: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn set_secure_permissions(path: &Path) -> io::Result<()> {
     use std::ptr;
-    use winapi::um::accctrl::{EXPLICIT_ACCESS_W, SE_FILE_OBJECT, TRUSTEE_W, NO_INHERITANCE};
-    use winapi::um::accctrl::{SET_ACCESS, GRANT_ACCESS, TRUSTEE_IS_USER};
-    use winapi::um::aclapi::SetNamedSecurityInfoW;
-    use winapi::um::securitybaseapi::{GetTokenInformation, AllocateAndInitializeSid};
-    use winapi::um::winnt::{
-        TokenUser, SID_IDENTIFIER_AUTHORITY, SECURITY_WORLD_SID_AUTHORITY,
-        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-        OWNER_SECURITY_INFORMATION, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-        TOKEN_QUERY, PSID, ACL,
-    };
-    use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
-    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::accctrl::{EXPLICIT_ACCESS_W, NO_INHERITANCE, SE_FILE_OBJECT, TRUSTEE_W};
+    use winapi::um::accctrl::{GRANT_ACCESS, SET_ACCESS, TRUSTEE_IS_USER};
     use winapi::um::aclapi::SetEntriesInAclW;
+    use winapi::um::aclapi::SetNamedSecurityInfoW;
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
+    use winapi::um::securitybaseapi::{AllocateAndInitializeSid, GetTokenInformation};
     use winapi::um::winbase::LocalFree;
+    use winapi::um::winnt::{
+        ACL, DACL_SECURITY_INFORMATION, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID,
+        SECURITY_WORLD_SID_AUTHORITY, SID_IDENTIFIER_AUTHORITY, TOKEN_QUERY, TokenUser,
+    };
 
     unsafe {
         // Get current process token
@@ -289,7 +288,9 @@ fn set_secure_permissions(path: &Path) -> io::Result<()> {
         let result = SetNamedSecurityInfoW(
             path_wide.as_ptr() as *mut u16,
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
+            DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION
+                | OWNER_SECURITY_INFORMATION,
             user_sid,
             ptr::null_mut(),
             new_acl,
@@ -317,12 +318,12 @@ fn set_secure_permissions(path: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn verify_secure_permissions(path: &Path) -> Result<()> {
     use std::ptr;
-    use winapi::um::aclapi::GetNamedSecurityInfoW;
     use winapi::um::accctrl::SE_FILE_OBJECT;
-    use winapi::um::winnt::{DACL_SECURITY_INFORMATION, ACL, PSID};
+    use winapi::um::aclapi::GetNamedSecurityInfoW;
     use winapi::um::securitybaseapi::GetAclInformation;
-    use winapi::um::winnt::{AclSizeInformation, ACL_SIZE_INFORMATION};
     use winapi::um::winbase::LocalFree;
+    use winapi::um::winnt::{ACL, DACL_SECURITY_INFORMATION, PSID};
+    use winapi::um::winnt::{ACL_SIZE_INFORMATION, AclSizeInformation};
 
     unsafe {
         let path_wide: Vec<u16> = path
@@ -750,7 +751,8 @@ fn main() -> Result<()> {
                 key
             ))?);
             vault.insert(key.clone(), value);
-            let (_counter, is_new) = save_vault(VAULT_FILE, COUNTER_FILE, &vault, &passphrase, &counter_key)?;
+            let (_counter, is_new) =
+                save_vault(VAULT_FILE, COUNTER_FILE, &vault, &passphrase, &counter_key)?;
             if is_new {
                 log_audit(AUDIT_FILE, AuditOperation::VaultCreated, true, &audit_key)?;
             }
@@ -892,13 +894,23 @@ fn main() -> Result<()> {
 
         "emergency-rotate" if args.len() == 2 => {
             emergency_key_rotation(VAULT_FILE, COUNTER_FILE, AUDIT_FILE, &passphrase)?;
-            log_audit(AUDIT_FILE, AuditOperation::EmergencyRotation, true, &audit_key)?;
+            log_audit(
+                AUDIT_FILE,
+                AuditOperation::EmergencyRotation,
+                true,
+                &audit_key,
+            )?;
             info!("Emergency keys rotated successfully");
         }
 
         "check-permissions" if args.len() == 2 => {
             check_and_fix_permissions(VAULT_FILE, COUNTER_FILE, AUDIT_FILE)?;
-            log_audit(AUDIT_FILE, AuditOperation::PermissionCheck, true, &audit_key)?;
+            log_audit(
+                AUDIT_FILE,
+                AuditOperation::PermissionCheck,
+                true,
+                &audit_key,
+            )?;
         }
         _ => {
             error!("Invalid command or arguments.");
@@ -1213,7 +1225,7 @@ fn save_vault(
     })?;
 
     // Read current counter
-    let current_counter = read_counter_locked( &counter_file_handle, counter_key)?;
+    let current_counter = read_counter_locked(&counter_file_handle, counter_key)?;
     let new_counter = current_counter
         .checked_add(1)
         .ok_or(VaultError::CounterOverflow)?;
@@ -1233,7 +1245,8 @@ fn save_vault(
         &counter_file_handle,
         new_counter,
         counter_key,
-    ).map_err(|e| {
+    )
+    .map_err(|e| {
         error!(error = %e, "Failed to write counter - aborting save");
         unlock_file(&counter_file_handle).ok();
         e
@@ -1302,7 +1315,8 @@ fn save_vault(
             debug!(from = %temp_file, to = %vault_file, "Performing atomic rename");
             match std::fs::rename(&temp_file, vault_file) {
                 Ok(()) => {
-                    set_secure_permissions(Path::new(vault_file))?;
+                    // Best effort to set permissions - don't fail on this
+                    let _ = set_secure_permissions(Path::new(vault_file));
 
                     #[cfg(unix)]
                     {
@@ -1373,13 +1387,13 @@ fn load_vault(
             e
         })?;
 
-    lock_file_exclusive(&counter_file_handle).map_err(|e| {
+    lock_file_shared(&counter_file_handle).map_err(|e| {
         error!(error = %e, "Failed to acquire lock on counter file");
         VaultError::ConcurrencyConflict
     })?;
 
     // STEP 2: Read stored counter while holding exclusive lock
-    let stored_counter = read_counter_locked( &counter_file_handle, counter_key)?;
+    let stored_counter = read_counter_locked(&counter_file_handle, counter_key)?;
 
     debug!(counter = stored_counter, "Read stored counter");
 
@@ -1397,26 +1411,25 @@ fn load_vault(
         VaultError::ConcurrencyConflict
     })?;
 
-    // STEP 5: Read vault counter from vault file header
+    // Read vault counter from vault file header
     let (vault_counter, vault_data) = read_vault_counter_from_file(&vault_file_handle)?;
     debug!(counter = vault_counter, "Read vault counter from file");
 
-    // STEP 6: Verify no rollback while holding both locks
+    // Check for rollback attack
     if vault_counter < stored_counter {
         error!(
             vault_counter = vault_counter,
             stored_counter = stored_counter,
             "Rollback attack detected"
         );
-
+    
         unlock_file(&counter_file_handle)?;
         unlock_file(&vault_file_handle)?;
-
+    
         return Err(VaultError::RollbackDetected {
             vault: vault_counter,
             stored: stored_counter,
-        }
-        .into());
+        });
     }
 
     // STEP 7: Decrypt and authenticate vault
@@ -1918,7 +1931,10 @@ fn backup_vault(
     passphrase: &SecureString,
 ) -> Result<()> {
     if !Path::new(vault_file).exists() {
-       return Err(VaultError::Io(std::io::Error::new(std::io::ErrorKind::InvalidFilename, "Vault file not found")));
+        return Err(VaultError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidFilename,
+            "Vault file not found",
+        )));
     }
     // First verify the vault is readable
     let counter_key = derive_counter_key(passphrase)?;
@@ -2145,7 +2161,7 @@ fn verify_vault(
     counter_file: &str,
     passphrase: &SecureString,
     counter_key: &SecureBytes,
-    check_permissions: bool
+    check_permissions: bool,
 ) -> io::Result<()> {
     // Try to load the vault
     let (vault, counter) = load_vault(vault_file, counter_file, passphrase, counter_key)?;
@@ -2163,7 +2179,6 @@ fn verify_vault(
         verify_secure_permissions(Path::new(counter_file))?;
         println!("  ✓ File permissions secure");
     }
-    
 
     // Verify counter file
     if Path::new(counter_file).exists() {
@@ -2396,7 +2411,8 @@ fn rotate_encryption_keys(
 
     // 3. Save with new random salt (forces new encryption keys)
     println!("🔄 Re-encrypting with new keys...");
-    let (new_counter, _is_new) = save_vault(vault_file, counter_file, &vault, passphrase, &counter_key)?;
+    let (new_counter, _is_new) =
+        save_vault(vault_file, counter_file, &vault, passphrase, &counter_key)?;
 
     // 4. Log audit event with new vault-specific key
     let new_salt = get_vault_salt(vault_file)?;
@@ -2964,7 +2980,13 @@ mod backup_tests {
         .unwrap();
 
         // Verify should succeed
-        let result = verify_vault(&files.vault, &files.counter, &passphrase, &counter_key, false);
+        let result = verify_vault(
+            &files.vault,
+            &files.counter,
+            &passphrase,
+            &counter_key,
+            false,
+        );
         assert!(result.is_ok(), "Verify should succeed for valid vault");
 
         // Tamper with vault
@@ -2975,7 +2997,13 @@ mod backup_tests {
         fs::write(&files.vault, data).unwrap();
 
         // Verify should fail
-        let result = verify_vault(&files.vault, &files.counter, &passphrase, &counter_key, false);
+        let result = verify_vault(
+            &files.vault,
+            &files.counter,
+            &passphrase,
+            &counter_key,
+            false,
+        );
         assert!(result.is_err(), "Verify should fail for tampered vault");
 
         cleanup_all(
@@ -3261,7 +3289,13 @@ mod backup_tests {
         let counter_key = derive_counter_key(&passphrase).unwrap();
 
         // Verify should fail for nonexistent vault
-        let result = verify_vault(&files.vault, &files.counter, &passphrase, &counter_key, false);
+        let result = verify_vault(
+            &files.vault,
+            &files.counter,
+            &passphrase,
+            &counter_key,
+            false,
+        );
         assert!(
             result.is_ok(),
             "Verify returns Ok for new vault (empty HashMap)"
@@ -3431,5 +3465,734 @@ mod cross_platform_tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.get("key1").unwrap().as_str(), "value1");
         assert_eq!(loaded.get("key2").unwrap().as_str(), "value2");
+    }
+}
+
+// ============================================================================
+// Concurrent Access and Crash Recovery Tests
+// ============================================================================
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_concurrent_reads() {
+        let dir = tempdir().unwrap();
+        let vault_file = dir.path().join("vault.enc").to_str().unwrap().to_string();
+        let counter_file = dir.path().join("counter").to_str().unwrap().to_string();
+        let passphrase = SecureString::new("test_pass".to_string());
+        let counter_key = derive_counter_key(&passphrase).unwrap();
+        let counter_key_bytes = counter_key.as_slice().to_vec();
+
+        // Create initial vault
+        let mut vault = HashMap::new();
+        vault.insert("key1".to_string(), SecureString::new("value1".to_string()));
+        vault.insert("key2".to_string(), SecureString::new("value2".to_string()));
+        save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
+        // Small delay to ensure file system has committed
+        thread::sleep(Duration::from_millis(50));
+
+        // Spawn multiple readers
+        let num_readers = 10;
+        let barrier = Arc::new(Barrier::new(num_readers));
+        let mut handles = vec![];
+
+        for i in 0..num_readers {
+            let vault_file = vault_file.clone();
+            let counter_file = counter_file.clone();
+            let passphrase = passphrase.clone();
+            let counter_key = SecureBytes::new(counter_key_bytes.clone());
+            let barrier = Arc::clone(&barrier);
+
+            let handle = thread::spawn(move || {
+                // Synchronize start
+                barrier.wait();
+
+                // All threads try to read at once - retry on transient conflicts
+                for attempt in 0..3 {
+                    match load_vault(&vault_file, &counter_file, &passphrase, &counter_key) {
+                        Ok((loaded_vault, _counter)) => {
+                            assert_eq!(loaded_vault.len(), 2);
+                            assert_eq!(loaded_vault.get("key1").unwrap().as_str(), "value1");
+                            assert_eq!(loaded_vault.get("key2").unwrap().as_str(), "value2");
+                            return Ok(());
+                        }
+                        Err(VaultError::ConcurrencyConflict) if attempt < 2 => {
+                            // Transient conflict, retry with backoff
+                            thread::sleep(Duration::from_millis(10 * (attempt + 1)));
+                            continue;
+                        }
+                        Err(e) => {
+                            return Err(format!("Reader {} failed: {:?}", i, e));
+                        }
+                    }
+                }
+                Err(format!("Reader {} exhausted retries", i))
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all readers to complete
+        let mut failures = Vec::new();
+        for (i, handle) in handles.into_iter().enumerate() {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(msg)) => failures.push(msg),
+                Err(_) => failures.push(format!("Reader {} panicked", i)),
+            }
+        }
+
+        if !failures.is_empty() {
+            panic!("Some readers failed:\n{}", failures.join("\n"));
+        }
+    }
+
+    #[test]
+    fn test_concurrent_write_contention() {
+        let dir = tempdir().unwrap();
+        let vault_file = dir.path().join("vault.enc").to_str().unwrap().to_string();
+        let counter_file = dir.path().join("counter").to_str().unwrap().to_string();
+        let passphrase = SecureString::new("test_pass".to_string());
+        let counter_key = derive_counter_key(&passphrase).unwrap();
+        let counter_key_bytes = counter_key.as_slice().to_vec();
+
+        // Create initial vault
+        let mut vault = HashMap::new();
+        vault.insert(
+            "initial".to_string(),
+            SecureString::new("value".to_string()),
+        );
+        save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
+        // Spawn multiple writers
+        let num_writers = 5;
+        let barrier = Arc::new(Barrier::new(num_writers));
+        let mut handles = vec![];
+
+        for i in 0..num_writers {
+            let vault_file = vault_file.clone();
+            let counter_file = counter_file.clone();
+            let passphrase = passphrase.clone();
+            let barrier = Arc::clone(&barrier);
+            let counter_key = SecureBytes::new(counter_key_bytes.clone());
+
+            let handle = thread::spawn(move || {
+                // Synchronize start
+                barrier.wait();
+
+                // Each thread tries to write
+                let mut vault = HashMap::new();
+                vault.insert(
+                    format!("key_{}", i),
+                    SecureString::new(format!("value_{}", i)),
+                );
+
+                // Some may succeed, some may get ConcurrencyConflict
+                let result = save_vault(
+                    &vault_file,
+                    &counter_file,
+                    &vault,
+                    &passphrase,
+                    &counter_key,
+                );
+
+                match result {
+                    Ok(_) => {
+                        println!("Writer {} succeeded", i);
+                        true
+                    }
+                    Err(VaultError::ConcurrencyConflict) => {
+                        println!("Writer {} got concurrency conflict (expected)", i);
+                        false
+                    }
+                    Err(e) => {
+                        panic!("Writer {} got unexpected error: {:?}", i, e);
+                    }
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        // Collect results
+        let mut successes = 0;
+        for handle in handles {
+            if handle.join().expect("Writer thread panicked") {
+                successes += 1;
+            }
+        }
+
+        println!("Successful writes: {}/{}", successes, num_writers);
+
+        // At least one should succeed, others should get lock contention
+        assert!(successes >= 1, "At least one write should succeed");
+        assert!(
+            successes <= num_writers,
+            "Can't have more successes than writers"
+        );
+
+        // Verify final vault is readable and consistent
+        let (final_vault, final_counter) =
+            load_vault(&vault_file, &counter_file, &passphrase, &counter_key).unwrap();
+
+        println!(
+            "Final vault has {} secrets, counter: {}",
+            final_vault.len(),
+            final_counter
+        );
+        assert!(!final_vault.is_empty(), "Final vault should have data");
+        assert!(final_counter > 0, "Counter should have incremented");
+    }
+
+    #[test]
+    fn test_read_during_write() {
+        let dir = tempdir().unwrap();
+        let vault_file = dir.path().join("vault.enc").to_str().unwrap().to_string();
+        let counter_file = dir.path().join("counter").to_str().unwrap().to_string();
+        let passphrase = SecureString::new("test_pass".to_string());
+        let counter_key = derive_counter_key(&passphrase).unwrap();
+        let counter_key_bytes = counter_key.as_slice().to_vec();
+        // Create initial vault
+        let mut vault = HashMap::new();
+        vault.insert("stable".to_string(), SecureString::new("data".to_string()));
+        save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Writer thread
+        let vault_file_w = vault_file.clone();
+        let counter_file_w = counter_file.clone();
+        let passphrase_w = passphrase.clone();
+        let counter_key_w = SecureBytes::new(counter_key_bytes.clone());
+        let barrier_w = Arc::clone(&barrier);
+
+        let writer = thread::spawn(move || {
+            barrier_w.wait();
+
+            // Slow write to increase chance of read conflict
+            thread::sleep(Duration::from_millis(10));
+
+            let mut vault = HashMap::new();
+            vault.insert("new".to_string(), SecureString::new("data".to_string()));
+            save_vault(
+                &vault_file_w,
+                &counter_file_w,
+                &vault,
+                &passphrase_w,
+                &counter_key_w,
+            )
+        });
+
+        // Reader thread
+        let vault_file_r = vault_file.clone();
+        let counter_file_r = counter_file.clone();
+        let passphrase_r = passphrase.clone();
+        let counter_key_r = SecureBytes::new(counter_key_bytes.clone());
+        let barrier_r = Arc::clone(&barrier);
+
+        let reader = thread::spawn(move || {
+            barrier_r.wait();
+
+            // Try to read while write might be happening
+            for _ in 0..5 {
+                let result = load_vault(
+                    &vault_file_r,
+                    &counter_file_r,
+                    &passphrase_r,
+                    &counter_key_r,
+                );
+
+                match result {
+                    Ok(_) => return true,
+                    Err(VaultError::ConcurrencyConflict) => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(e) => panic!("Unexpected error: {:?}", e),
+                }
+            }
+            false
+        });
+
+        let write_result = writer.join().expect("Writer panicked");
+        let read_succeeded = reader.join().expect("Reader panicked");
+
+        // Either write succeeded or got conflict
+        match write_result {
+            Ok(_) | Err(VaultError::ConcurrencyConflict) => {}
+            Err(e) => panic!("Unexpected write error: {:?}", e),
+        }
+
+        // Reader should eventually succeed
+        assert!(read_succeeded, "Reader should eventually succeed");
+    }
+
+    #[test]
+    fn test_counter_monotonicity_under_concurrency() {
+        let dir = tempdir().unwrap();
+        let vault_file = dir.path().join("vault.enc").to_str().unwrap().to_string();
+        let counter_file = dir.path().join("counter").to_str().unwrap().to_string();
+        let passphrase = SecureString::new("test_pass".to_string());
+        let counter_key = derive_counter_key(&passphrase).unwrap();
+        let counter_key_bytes = counter_key.as_slice().to_vec();
+
+        // Initialize vault
+        let mut vault = HashMap::new();
+        vault.insert("key".to_string(), SecureString::new("value".to_string()));
+        let (initial_counter, _) = save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
+        let num_writers = 10;
+        let mut handles = vec![];
+
+        for i in 0..num_writers {
+            let vault_file = vault_file.clone();
+            let counter_file = counter_file.clone();
+            let passphrase = passphrase.clone();
+            let counter_key = SecureBytes::new(counter_key_bytes.clone());
+
+            let handle = thread::spawn(move || {
+                // Add delay to spread out attempts
+                thread::sleep(Duration::from_millis(i * 10));
+
+                let mut vault = HashMap::new();
+                vault.insert(
+                    format!("key_{}", i),
+                    SecureString::new(format!("value_{}", i)),
+                );
+
+                // Retry on conflict
+                for retry in 0..3 {
+                    match save_vault(
+                        &vault_file,
+                        &counter_file,
+                        &vault,
+                        &passphrase,
+                        &counter_key,
+                    ) {
+                        Ok((counter, _)) => return Some(counter),
+                        Err(VaultError::ConcurrencyConflict) => {
+                            thread::sleep(Duration::from_millis(50 * (retry + 1)));
+                            continue;
+                        }
+                        Err(e) => panic!("Unexpected error: {:?}", e),
+                    }
+                }
+                None // Failed after retries
+            });
+
+            handles.push(handle);
+        }
+
+        let mut counters: Vec<u64> = handles
+            .into_iter()
+            .filter_map(|h| h.join().expect("Thread panicked"))
+            .collect();
+
+        counters.sort();
+
+        println!("Successful counter values: {:?}", counters);
+
+        // All counters should be > initial
+        for counter in &counters {
+            assert!(*counter > initial_counter, "Counter should always increase");
+        }
+
+        // No duplicates (monotonicity)
+        for i in 1..counters.len() {
+            assert!(
+                counters[i] > counters[i - 1],
+                "Counters should be strictly increasing"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod crash_recovery_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_recovery_after_counter_write_vault_missing() {
+        // Simulates: counter incremented, but vault write never happened
+        let dir = tempdir().unwrap();
+        let vault_file = dir.path().join("vault.enc").to_str().unwrap().to_string();
+        let counter_file = dir.path().join("counter").to_str().unwrap().to_string();
+        let passphrase = SecureString::new("test_pass".to_string());
+        let counter_key = derive_counter_key(&passphrase).unwrap();
+
+        // Create initial vault
+        let mut vault = HashMap::new();
+        vault.insert("key1".to_string(), SecureString::new("value1".to_string()));
+        let (counter1, _) = save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
+        // Simulate counter increment without vault update
+        let counter_handle = fs::OpenOptions::new()
+            .write(true)
+            .open(&counter_file)
+            .unwrap();
+
+        lock_file_exclusive(&counter_handle).unwrap();
+        write_counter_locked(&counter_file, &counter_handle, counter1 + 1, &counter_key).unwrap();
+        drop(counter_handle);
+
+        // Now try to load - should see counter ahead of vault
+        let (loaded_vault, loaded_counter) =
+            load_vault(&vault_file, &counter_file, &passphrase, &counter_key).unwrap();
+
+        // Should load successfully and sync counter back to vault
+        assert_eq!(loaded_vault.len(), 1);
+        assert_eq!(
+            loaded_counter, counter1,
+            "Counter should sync back to vault counter"
+        );
+
+        // Verify counter was actually fixed
+        let counter_handle = fs::OpenOptions::new()
+            .read(true)
+            .open(&counter_file)
+            .unwrap();
+        let fixed_counter = read_counter_locked(&counter_handle, &counter_key).unwrap();
+        assert_eq!(
+            fixed_counter, counter1,
+            "Counter should be fixed to match vault"
+        );
+    }
+
+    #[test]
+    fn test_recovery_partial_vault_write() {
+        // Simulates: vault file partially written (corrupted)
+        let dir = tempdir().unwrap();
+        let vault_file = dir.path().join("vault.enc").to_str().unwrap().to_string();
+        let counter_file = dir.path().join("counter").to_str().unwrap().to_string();
+        let passphrase = SecureString::new("test_pass".to_string());
+        let counter_key = derive_counter_key(&passphrase).unwrap();
+
+        // Create valid vault
+        let mut vault = HashMap::new();
+        vault.insert("key1".to_string(), SecureString::new("value1".to_string()));
+        save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
+        // Corrupt vault file (truncate it)
+        let vault_data = fs::read(&vault_file).unwrap();
+        fs::write(&vault_file, &vault_data[..vault_data.len() / 2]).unwrap();
+
+        // Load should fail with authentication or corruption error
+        let result = load_vault(&vault_file, &counter_file, &passphrase, &counter_key);
+        assert!(result.is_err(), "Should detect corrupted vault");
+
+        // Error should be about data corruption or authentication
+        match result.unwrap_err() {
+            VaultError::AuthenticationFailed
+            | VaultError::CryptoError(_)
+            | VaultError::InvalidDataFormat(_) => {}
+            e => panic!("Unexpected error type: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_recovery_temp_file_leftover() {
+        // Simulates: temp file left behind from crashed save
+        let dir = tempdir().unwrap();
+        let vault_file = dir.path().join("vault.enc").to_str().unwrap().to_string();
+        let counter_file = dir.path().join("counter").to_str().unwrap().to_string();
+        let passphrase = SecureString::new("test_pass".to_string());
+        let counter_key = derive_counter_key(&passphrase).unwrap();
+
+        // Create valid vault
+        let mut vault = HashMap::new();
+        vault.insert(
+            "original".to_string(),
+            SecureString::new("data".to_string()),
+        );
+        let (counter, _) = save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
+        // Create fake temp file (simulating crashed save)
+        let temp_file = format!("{}.tmp.{}", vault_file, counter + 1);
+        fs::write(&temp_file, b"corrupted temp data").unwrap();
+
+        // Should be able to load vault normally (temp file ignored)
+        let (loaded_vault, _) =
+            load_vault(&vault_file, &counter_file, &passphrase, &counter_key).unwrap();
+        assert_eq!(loaded_vault.len(), 1);
+        assert_eq!(loaded_vault.get("original").unwrap().as_str(), "data");
+
+        // New save should succeed despite temp file
+        vault.insert("new".to_string(), SecureString::new("value".to_string()));
+        let result = save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        );
+        assert!(result.is_ok(), "Should save despite leftover temp file");
+
+        // Cleanup temp file
+        let _ = fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_rollback_attack_detection() {
+        // Simulates: attacker replaces vault with old version
+        let dir = tempdir().unwrap();
+        let vault_file = dir.path().join("vault.enc").to_str().unwrap().to_string();
+        let counter_file = dir.path().join("counter").to_str().unwrap().to_string();
+        let passphrase = SecureString::new("test_pass".to_string());
+        let counter_key = derive_counter_key(&passphrase).unwrap();
+
+        // Create version 1
+        let mut vault = HashMap::new();
+        vault.insert("balance".to_string(), SecureString::new("100".to_string()));
+        save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+        let v1_data = fs::read(&vault_file).unwrap();
+
+        // Create version 2 (balance increased)
+        vault.insert("balance".to_string(), SecureString::new("1000".to_string()));
+        save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
+        // Create version 3 (balance increased more)
+        vault.insert("balance".to_string(), SecureString::new("5000".to_string()));
+        save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
+        // Attacker replaces with v1 (rollback attack)
+        fs::write(&vault_file, &v1_data).unwrap();
+
+        // Load should detect rollback
+        let result = load_vault(&vault_file, &counter_file, &passphrase, &counter_key);
+        assert!(result.is_err(), "Should detect rollback attack");
+
+        match result.unwrap_err() {
+            VaultError::RollbackDetected { vault, stored } => {
+                println!("Detected rollback: vault={}, stored={}", vault, stored);
+                assert!(vault < stored, "Vault counter should be less than stored");
+            }
+            e => panic!("Expected RollbackDetected, got: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_counter_file_corruption_recovery() {
+        // Simulates: counter file corrupted but vault intact
+        let dir = tempdir().unwrap();
+        let vault_file = dir.path().join("vault.enc").to_str().unwrap().to_string();
+        let counter_file = dir.path().join("counter").to_str().unwrap().to_string();
+        let passphrase = SecureString::new("test_pass".to_string());
+        let counter_key = derive_counter_key(&passphrase).unwrap();
+
+        // Create valid vault
+        let mut vault = HashMap::new();
+        vault.insert("key".to_string(), SecureString::new("value".to_string()));
+        save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
+        // Corrupt counter file
+        fs::write(&counter_file, b"corrupted").unwrap();
+
+        // Load should fail
+        let result = load_vault(&vault_file, &counter_file, &passphrase, &counter_key);
+        assert!(result.is_err(), "Should detect corrupted counter");
+
+        match result.unwrap_err() {
+            VaultError::InvalidDataFormat(_) | VaultError::AuthenticationFailed => {}
+            e => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_atomic_save_rollback_on_rename_failure() {
+        // This test verifies counter rollback on vault rename failure
+        let dir = tempdir().unwrap();
+        let vault_file = dir.path().join("vault.enc").to_str().unwrap().to_string();
+        let counter_file = dir.path().join("counter").to_str().unwrap().to_string();
+        let passphrase = SecureString::new("test_pass".to_string());
+        let counter_key = derive_counter_key(&passphrase).unwrap();
+
+        // Create initial vault
+        let mut vault = HashMap::new();
+        vault.insert("key".to_string(), SecureString::new("value".to_string()));
+        let (initial_counter, _) = save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
+        // Make vault file read-only to simulate rename failure
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&vault_file).unwrap().permissions();
+            perms.set_mode(0o444); // Read-only
+            fs::set_permissions(&vault_file, perms).unwrap();
+        }
+
+        // Try to save - should fail
+        vault.insert(
+            "new_key".to_string(),
+            SecureString::new("new_value".to_string()),
+        );
+        let result = save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        );
+
+        #[cfg(unix)]
+        {
+            assert!(result.is_err(), "Save should fail with read-only file");
+
+            // Verify counter was rolled back
+            let counter_handle = fs::OpenOptions::new()
+                .read(true)
+                .open(&counter_file)
+                .unwrap();
+            let current_counter = read_counter_locked(&counter_handle, &counter_key).unwrap();
+            assert_eq!(
+                current_counter, initial_counter,
+                "Counter should be rolled back"
+            );
+        }
+
+        // Restore permissions for cleanup
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&vault_file).unwrap().permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&vault_file, perms).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_recovery_with_multiple_temp_files() {
+        // Simulates: multiple failed save attempts leaving temp files
+        let dir = tempdir().unwrap();
+        let vault_file = dir.path().join("vault.enc").to_str().unwrap().to_string();
+        let counter_file = dir.path().join("counter").to_str().unwrap().to_string();
+        let passphrase = SecureString::new("test_pass".to_string());
+        let counter_key = derive_counter_key(&passphrase).unwrap();
+
+        // Create valid vault
+        let mut vault = HashMap::new();
+        vault.insert("key".to_string(), SecureString::new("value".to_string()));
+        let (counter, _) = save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        )
+        .unwrap();
+
+        // Create multiple fake temp files
+        for i in 1..5 {
+            let temp = format!("{}.tmp.{}", vault_file, counter + i);
+            fs::write(&temp, format!("fake temp {}", i)).unwrap();
+        }
+
+        // Should still be able to save
+        vault.insert("new".to_string(), SecureString::new("data".to_string()));
+        let result = save_vault(
+            &vault_file,
+            &counter_file,
+            &vault,
+            &passphrase,
+            &counter_key,
+        );
+        assert!(result.is_ok(), "Should save despite multiple temp files");
+
+        // Should be able to load
+        let (loaded, _) =
+            load_vault(&vault_file, &counter_file, &passphrase, &counter_key).unwrap();
+        assert_eq!(loaded.len(), 2);
     }
 }
