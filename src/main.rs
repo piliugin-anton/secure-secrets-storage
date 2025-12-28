@@ -2341,37 +2341,6 @@ fn get_vault_salt(vault_file: &str) -> Result<Vec<u8>> {
     Ok(salt)
 }
 
-/// Derive audit key from passphrase AND vault salt
-/// This ties audit log to specific vault instance
-fn derive_audit_key_from_vault(
-    passphrase: &SecureString,
-    vault_salt: &[u8],
-) -> Result<SecureBytes> {
-    // Combine vault salt with audit-specific suffix
-    let mut audit_salt = Vec::with_capacity(vault_salt.len() + 32);
-    audit_salt.extend_from_slice(vault_salt);
-    audit_salt.extend_from_slice(b"-vault-audit-key-derivation-v2");
-
-    let argon2 = Argon2::new(
-        Algorithm::Argon2id,
-        Version::V0x13,
-        Params::new(
-            128 * 1024, // 128 MB memory
-            3,          // 3 iterations
-            4,          // 4 threads
-            Some(32),
-        )
-        .map_err(|e| VaultError::Argon2(format!("Argon2 params: {}", e)))?,
-    );
-
-    let mut audit_key = vec![0u8; KEY_SIZE];
-    argon2
-        .hash_password_into(passphrase.as_bytes(), &audit_salt, &mut audit_key)
-        .map_err(|e| VaultError::Argon2(format!("Audit key derivation: {}", e)))?;
-
-    Ok(SecureBytes::new(audit_key))
-}
-
 // ============================================================================
 // Key Rotation Without Passphrase Change
 // ============================================================================
@@ -2415,8 +2384,7 @@ fn rotate_encryption_keys(
         save_vault(vault_file, counter_file, &vault, passphrase, &counter_key)?;
 
     // 4. Log audit event with new vault-specific key
-    let new_salt = get_vault_salt(vault_file)?;
-    let new_audit_key = derive_audit_key_from_vault(passphrase, &new_salt)?;
+    let new_audit_key = derive_audit_key(passphrase)?;
 
     log_audit(
         audit_file,
