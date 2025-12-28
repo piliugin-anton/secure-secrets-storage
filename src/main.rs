@@ -1388,11 +1388,10 @@ fn read_counter_locked(file: &File, auth_key: &SecureBytes) -> Result<u64> {
     mac.update(counter_bytes);
 
     mac.verify_slice(stored_hmac).map_err(|_| {
-        let message = "Counter file HMAC verification failed - file may be corrupted or tampered";
         error!(
-            message = message,
+            message = "Counter file HMAC verification failed - file may be corrupted or tampered",
         );
-        VaultError::InvalidDataFormat(message.into())
+        VaultError::AuthenticationFailed
     })?;
 
     // Convert bytes to u64
@@ -1983,7 +1982,7 @@ mod tests {
         let result = load_vault(&vault_file, &counter_file, &wrong, &wrong_counter_key);
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), VaultError::InvalidDataFormat(_message)));
+        assert!(matches!(result.unwrap_err(), VaultError::AuthenticationFailed));
 
         cleanup(&vault_file, &counter_file, &audit_file);
     }
@@ -2470,7 +2469,7 @@ mod backup_tests {
         // Verify the error is related to authentication/decryption
         match load_result {
             Err(e) => {
-                assert!(matches!(e, VaultError::InvalidDataFormat(_message)));
+                assert!(matches!(e, VaultError::AuthenticationFailed));
             }
             Ok(_) => panic!("Should have failed with wrong passphrase"),
         }
