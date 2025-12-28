@@ -2021,7 +2021,7 @@ fn restore_vault(
         "    Current vault will be backed up to {}.pre-restore",
         vault_file
     );
-    let confirm = prompt_password("Type 'yes' to confirm: ")?;
+    let confirm = rprompt::prompt_reply("Type 'yes' to confirm: ").unwrap();
     if confirm.trim() != "yes" {
         println!("Restore cancelled.");
         return Ok(());

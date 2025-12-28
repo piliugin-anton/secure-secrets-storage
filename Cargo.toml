@@ -29,6 +29,7 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
 # Time handling
 chrono = "0.4.42"
+rprompt = "2.2.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
