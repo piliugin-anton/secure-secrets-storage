@@ -1714,15 +1714,10 @@ fn restore_vault(
     // Verify HMAC
     let backup_key = derive_backup_key(passphrase)?;
     let mut mac = <HmacSha256 as Mac>::new_from_slice(backup_key.as_slice())
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "HMAC init failed"))?;
+        .map_err(|_| VaultError::Hmac("HMAC init failed".into()))?;
     mac.update(content);
 
-    mac.verify_slice(stored_hmac).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Backup verification failed - wrong passphrase or corrupted backup",
-        )
-    })?;
+    mac.verify_slice(stored_hmac).map_err(|_| VaultError::CorruptedVault("Backup verification failed - wrong passphrase or corrupted backup".into()))?;
 
     // Parse backup content
     let mut cursor = 0;
