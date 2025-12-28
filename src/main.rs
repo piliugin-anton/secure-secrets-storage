@@ -495,22 +495,24 @@ impl SecureBytes {
 // Audit operation types (no sensitive data)
 #[derive(Debug, Clone, PartialEq)]
 enum AuditOperation {
+    VaultCreated,
     VaultAccess,
     SecretRead,
     SecretWrite,
     SecretDelete,
     PassphraseChange,
-    KeyRotation,       // NEW
-    EmergencyRotation, // NEW
+    KeyRotation,
+    EmergencyRotation,
     AuditView,
     BackupCreated,
     VaultRestored,
-    PermissionCheck, // NEW
+    PermissionCheck,
 }
 
 impl AuditOperation {
     fn as_str(&self) -> &str {
         match self {
+            AuditOperation::VaultCreated => "VAULT_CREATED",
             AuditOperation::VaultAccess => "VAULT_ACCESS",
             AuditOperation::SecretRead => "SECRET_READ",
             AuditOperation::SecretWrite => "SECRET_WRITE",
@@ -587,7 +589,10 @@ fn main() -> Result<()> {
                 key
             ))?);
             vault.insert(key.clone(), value);
-            save_vault(VAULT_FILE, COUNTER_FILE, &vault, &passphrase, &counter_key)?;
+            let (_counter, is_new) =save_vault(VAULT_FILE, COUNTER_FILE, &vault, &passphrase, &counter_key)?;
+            if is_new {
+                log_audit(AUDIT_FILE, AuditOperation::VaultCreated, true, &audit_key)?;
+            }
             log_audit(AUDIT_FILE, AuditOperation::SecretWrite, true, &audit_key)?;
             info!("Secret added successfully.");
         }
@@ -1014,7 +1019,7 @@ fn save_vault(
     vault: &HashMap<String, SecureString>,
     passphrase: &SecureString,
     counter_key: &SecureBytes,
-) -> Result<u64> {
+) -> Result<(u64, bool)> {
     info!(
         vault = %vault_file,
         secrets_count = vault.len(),
@@ -1139,7 +1144,7 @@ fn save_vault(
                     }
                     unlock_file(&counter_file_handle)?;
                     info!(counter = new_counter, "Vault saved successfully");
-                    Ok(new_counter)
+                    Ok((new_counter, state.is_new()))
                 }
                 Err(e) => {
                     // Rename failed - clean up temp file
@@ -1741,7 +1746,10 @@ fn backup_vault(
     audit_file: &str,
     backup_path: &str,
     passphrase: &SecureString,
-) -> io::Result<()> {
+) -> Result<()> {
+    if !Path::new(vault_file).exists() {
+       return Err(VaultError::Io(std::io::Error::new(std::io::ErrorKind::InvalidFilename, "Vault file not found")));
+    }
     // First verify the vault is readable
     let counter_key = derive_counter_key(passphrase)?;
     let (vault, counter) = load_vault(vault_file, counter_file, passphrase, &counter_key)?;
@@ -2218,7 +2226,7 @@ fn rotate_encryption_keys(
 
     // 3. Save with new random salt (forces new encryption keys)
     println!("🔄 Re-encrypting with new keys...");
-    let new_counter = save_vault(vault_file, counter_file, &vault, passphrase, &counter_key)?;
+    let (new_counter, _is_new) = save_vault(vault_file, counter_file, &vault, passphrase, &counter_key)?;
 
     // 4. Log audit event with new vault-specific key
     let new_salt = get_vault_salt(vault_file)?;
