@@ -195,29 +195,202 @@ fn set_secure_permissions(path: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn set_secure_permissions(path: &Path) -> io::Result<()> {
-    // Get current user SID
-    let path_wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    use std::ptr;
+    use winapi::um::accctrl::{EXPLICIT_ACCESS_W, SE_FILE_OBJECT, TRUSTEE_W, NO_INHERITANCE};
+    use winapi::um::accctrl::{SET_ACCESS, GRANT_ACCESS, TRUSTEE_IS_USER};
+    use winapi::um::aclapi::SetNamedSecurityInfoW;
+    use winapi::um::securitybaseapi::{GetTokenInformation, AllocateAndInitializeSid};
+    use winapi::um::winnt::{
+        TokenUser, SID_IDENTIFIER_AUTHORITY, SECURITY_WORLD_SID_AUTHORITY,
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        OWNER_SECURITY_INFORMATION, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        TOKEN_QUERY, PSID, ACL,
+    };
+    use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::aclapi::SetEntriesInAclW;
+    use winapi::um::winbase::LocalFree;
 
-    // Set ACL to current user only (remove all other access)
-    // This is a simplified version - full implementation would use
-    // GetTokenInformation, AllocateAndInitializeSid, SetEntriesInAcl
+    unsafe {
+        // Get current process token
+        let mut token_handle = ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle) == 0 {
+            return Err(io::Error::last_os_error());
+        }
 
-    // For now, use basic attribute setting
-    use std::os::windows::fs::OpenOptionsExt;
-    use winapi::um::winbase::FILE_ATTRIBUTE_HIDDEN;
+        // Get token user information size
+        let mut token_info_len = 0u32;
+        GetTokenInformation(
+            token_handle,
+            TokenUser,
+            ptr::null_mut(),
+            0,
+            &mut token_info_len,
+        );
 
-    // Set hidden + system attributes for additional obscurity
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .attributes(FILE_ATTRIBUTE_HIDDEN)
-        .open(path)?;
+        if token_info_len == 0 {
+            CloseHandle(token_handle);
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Failed to get token info length",
+            ));
+        }
 
-    debug!(path = ?path, "Set secure permissions (Windows hidden)");
-    Ok(())
+        // Allocate buffer and get actual token information
+        let mut token_info = vec![0u8; token_info_len as usize];
+        if GetTokenInformation(
+            token_handle,
+            TokenUser,
+            token_info.as_mut_ptr() as *mut _,
+            token_info_len,
+            &mut token_info_len,
+        ) == 0
+        {
+            CloseHandle(token_handle);
+            return Err(io::Error::last_os_error());
+        }
+
+        // Extract user SID from token info
+        #[repr(C)]
+        struct TOKEN_USER {
+            user: winapi::um::winnt::SID_AND_ATTRIBUTES,
+        }
+        let token_user_ptr = token_info.as_ptr() as *const TOKEN_USER;
+        let user_sid = (*token_user_ptr).user.Sid;
+
+        // Create EXPLICIT_ACCESS for current user (full control)
+        let mut ea: EXPLICIT_ACCESS_W = std::mem::zeroed();
+        ea.grfAccessPermissions = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
+        ea.grfAccessMode = SET_ACCESS;
+        ea.grfInheritance = NO_INHERITANCE;
+        ea.Trustee.TrusteeForm = TRUSTEE_IS_USER;
+        ea.Trustee.ptstrName = user_sid as *mut u16;
+
+        // Create new ACL with only current user
+        let mut new_acl: *mut ACL = ptr::null_mut();
+        let result = SetEntriesInAclW(1, &mut ea, ptr::null_mut(), &mut new_acl);
+
+        if result != 0 {
+            CloseHandle(token_handle);
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("SetEntriesInAclW failed: {}", result),
+            ));
+        }
+
+        // Convert path to wide string
+        let path_wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        // Apply the new ACL to the file
+        let result = SetNamedSecurityInfoW(
+            path_wide.as_ptr() as *mut u16,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
+            user_sid,
+            ptr::null_mut(),
+            new_acl,
+            ptr::null_mut(),
+        );
+
+        // Cleanup
+        if !new_acl.is_null() {
+            LocalFree(new_acl as *mut _);
+        }
+        CloseHandle(token_handle);
+
+        if result != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("SetNamedSecurityInfoW failed: {}", result),
+            ));
+        }
+
+        debug!(path = ?path, "Set secure permissions (Windows ACL - owner only)");
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn verify_secure_permissions(path: &Path) -> Result<()> {
+    use std::ptr;
+    use winapi::um::aclapi::GetNamedSecurityInfoW;
+    use winapi::um::accctrl::SE_FILE_OBJECT;
+    use winapi::um::winnt::{DACL_SECURITY_INFORMATION, ACL, PSID};
+    use winapi::um::securitybaseapi::GetAclInformation;
+    use winapi::um::winnt::{AclSizeInformation, ACL_SIZE_INFORMATION};
+    use winapi::um::winbase::LocalFree;
+
+    unsafe {
+        let path_wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let mut sd: PSID = ptr::null_mut();
+
+        let result = GetNamedSecurityInfoW(
+            path_wide.as_ptr() as *mut u16,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut sd,
+        );
+
+        if result != 0 {
+            return Err(VaultError::InsecurePermissions { mode: 0 });
+        }
+
+        // Check DACL exists
+        if dacl.is_null() {
+            if !sd.is_null() {
+                LocalFree(sd as *mut _);
+            }
+            return Err(VaultError::InsecurePermissions { mode: 0 });
+        }
+
+        // Get ACL size information
+        let mut acl_size_info: ACL_SIZE_INFORMATION = std::mem::zeroed();
+        if GetAclInformation(
+            dacl,
+            &mut acl_size_info as *mut _ as *mut _,
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        ) == 0
+        {
+            if !sd.is_null() {
+                LocalFree(sd as *mut _);
+            }
+            return Err(VaultError::InsecurePermissions { mode: 0 });
+        }
+
+        // Verify only one ACE (current user only)
+        if acl_size_info.AceCount > 1 {
+            warn!(
+                path = ?path,
+                ace_count = acl_size_info.AceCount,
+                "File has multiple ACEs - may be accessible by other users"
+            );
+            if !sd.is_null() {
+                LocalFree(sd as *mut _);
+            }
+            return Err(VaultError::InsecurePermissions { mode: 0 });
+        }
+
+        if !sd.is_null() {
+            LocalFree(sd as *mut _);
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -243,18 +416,6 @@ fn verify_secure_permissions(path: &Path) -> Result<()> {
         return Err(VaultError::InsecurePermissions { mode });
     }
 
-    Ok(())
-}
-
-#[cfg(windows)]
-fn verify_secure_permissions(path: &Path) -> Result<()> {
-    // On Windows, verify file is not accessible to other users
-    // This requires checking ACLs which is complex
-    // For now, just verify file exists and is readable by current user
-
-    let _metadata = std::fs::metadata(path)?;
-    // TODO: Implement full ACL verification
-    warn!(path = ?path, "Full permission verification not yet implemented on Windows");
     Ok(())
 }
 
@@ -589,7 +750,7 @@ fn main() -> Result<()> {
                 key
             ))?);
             vault.insert(key.clone(), value);
-            let (_counter, is_new) =save_vault(VAULT_FILE, COUNTER_FILE, &vault, &passphrase, &counter_key)?;
+            let (_counter, is_new) = save_vault(VAULT_FILE, COUNTER_FILE, &vault, &passphrase, &counter_key)?;
             if is_new {
                 log_audit(AUDIT_FILE, AuditOperation::VaultCreated, true, &audit_key)?;
             }
@@ -862,7 +1023,7 @@ fn derive_audit_key(passphrase: &SecureString) -> Result<SecureBytes> {
     let argon2 = Argon2::new(
         Algorithm::Argon2id,
         Version::V0x13,
-        Params::new(64 * 1024, 2, 2, Some(32))
+        Params::new(256 * 1024, 3, 4, Some(32))
             .map_err(|e| VaultError::Argon2(format!("Argon2 params: {}", e).into()))?,
     );
 
@@ -880,7 +1041,7 @@ fn derive_counter_key(passphrase: &SecureString) -> Result<SecureBytes> {
     let argon2 = Argon2::new(
         Algorithm::Argon2id,
         Version::V0x13,
-        Params::new(64 * 1024, 2, 2, Some(32))
+        Params::new(256 * 1024, 3, 4, Some(32))
             .map_err(|e| VaultError::Argon2(format!("Argon2 params: {}", e).into()))?,
     );
 
@@ -1062,6 +1223,22 @@ fn save_vault(
         "Incrementing counter"
     );
 
+    // =========================================================================
+    // Write new counter FIRST (before vault)
+    // This is critical - if we crash after this, vault load will detect
+    // vault_counter < stored_counter and will update stored counter to match
+    // =========================================================================
+    write_counter_locked(
+        &counter_file,
+        &counter_file_handle,
+        new_counter,
+        counter_key,
+    ).map_err(|e| {
+        error!(error = %e, "Failed to write counter - aborting save");
+        unlock_file(&counter_file_handle).ok();
+        e
+    })?;
+
     // Prepare encrypted vault data
     let temp_file = format!("{}.tmp.{}", vault_file, new_counter);
 
@@ -1126,13 +1303,6 @@ fn save_vault(
             match std::fs::rename(&temp_file, vault_file) {
                 Ok(()) => {
                     set_secure_permissions(Path::new(vault_file))?;
-                    // Update counter only after successful vault write
-                    write_counter_locked(
-                        &counter_file,
-                        &counter_file_handle,
-                        new_counter,
-                        counter_key,
-                    )?;
 
                     #[cfg(unix)]
                     {
@@ -1256,11 +1426,11 @@ fn load_vault(
 
     // STEP 8: Update stored counter atomically if vault counter is newer
     // This handles the case where a previous update succeeded but counter write failed
-    if vault_counter > stored_counter {
+    if vault_counter < stored_counter {
         warn!(
             old = stored_counter,
             new = vault_counter,
-            "Updating stored counter to match vault"
+            "Stored counter behind vault counter (normal after save) - updating"
         );
         write_counter_locked(
             &counter_file,
@@ -2128,7 +2298,7 @@ fn derive_backup_key(passphrase: &SecureString) -> io::Result<SecureBytes> {
     let argon2 = Argon2::new(
         Algorithm::Argon2id,
         Version::V0x13,
-        Params::new(64 * 1024, 2, 2, Some(32))
+        Params::new(256 * 1024, 3, 4, Some(32))
             .map_err(|e| VaultError::Argon2(format!("Argon2 params: {}", e).into()))?,
     );
 
