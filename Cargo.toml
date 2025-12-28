@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["Anton Piliugin <anton.piliugin@icloud.com>"]
 description = "A secure command-line secrets manager with encryption, rollback protection, and audit logging"
 license = "MIT"
-repository = "https://github.com/yourusername/secure-secrets-storage"
+repository = "https://github.com/piliugin-anton/secure-secrets-storage"
 keywords = ["security", "encryption", "secrets", "vault", "password-manager"]
 categories = ["command-line-utilities", "cryptography"]
 
