@@ -15,6 +15,9 @@ sha2 = "0.10.9"
 zeroize = "1.8.2"
 chrono = "0.4.42"
 tempfile = "3.24.0"
+thiserror = "2.0.17"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

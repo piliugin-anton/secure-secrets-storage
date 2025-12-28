@@ -21,6 +21,188 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
+use thiserror::Error;
+use tracing::{debug, error, info, warn};
+
+// ============================================================================
+// Error Types
+// ============================================================================
+
+#[derive(Error, Debug)]
+pub enum VaultError {
+    #[error("Authentication failed - wrong passphrase or tampered data")]
+    AuthenticationFailed,
+
+    #[error("Rollback attack detected: vault counter {vault} < stored {stored}")]
+    RollbackDetected { vault: u64, stored: u64 },
+
+    #[error("Vault file corrupted: {0}")]
+    CorruptedVault(String),
+
+    #[error("Concurrent access conflict - retry operation")]
+    ConcurrencyConflict,
+
+    #[error("Unsupported vault version: {found} (expected {expected})")]
+    UnsupportedVersion { found: u8, expected: u8 },
+
+    #[error("Insecure file permissions: {mode:o} (expected 0600)")]
+    InsecurePermissions { mode: u32 },
+
+    #[error("Cryptographic operation failed: {0}")]
+    CryptoError(String),
+
+    #[error("Invalid key format: {0}")]
+    InvalidKeyFormat(String),
+
+    #[error("Invalid data format: {0}")]
+    InvalidDataFormat(String),
+
+    #[error("Counter overflow - vault has reached maximum operations")]
+    CounterOverflow,
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Argon2 error: {0}")]
+    Argon2(String),
+
+    #[error("HMAC error: {0}")]
+    Hmac(String),
+}
+
+pub type Result<T> = std::result::Result<T, VaultError>;
+
+// ============================================================================
+// Vault State Machine
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum VaultState {
+    /// Neither vault nor counter file exists - brand new vault
+    New,
+
+    /// Both files exist and are valid
+    Initialized,
+
+    /// Only vault exists without counter (data loss scenario)
+    Corrupted(String),
+
+    /// Legacy vault format detected (for future migrations)
+    Migrating { from_version: u8, to_version: u8 },
+
+    /// Counter exists but vault doesn't (orphaned counter)
+    Orphaned,
+}
+
+impl VaultState {
+    /// Check the current state of vault files
+    pub fn check(vault_file: &str, counter_file: &str) -> Self {
+        use std::path::Path;
+
+        let vault_exists = Path::new(vault_file).exists();
+        let counter_exists = Path::new(counter_file).exists();
+
+        match (vault_exists, counter_exists) {
+            (false, false) => {
+                debug!("Vault state: New (no files exist)");
+                VaultState::New
+            }
+            (true, true) => {
+                debug!("Vault state: Initialized (both files exist)");
+                VaultState::Initialized
+            }
+            (true, false) => {
+                warn!(
+                    vault = %vault_file,
+                    "Vault exists without counter file - data loss scenario"
+                );
+                VaultState::Corrupted(
+                    "Vault file exists but counter file is missing - possible data loss".into(),
+                )
+            }
+            (false, true) => {
+                warn!(
+                    counter = %counter_file,
+                    "Counter file exists without vault - orphaned state"
+                );
+                VaultState::Orphaned
+            }
+        }
+    }
+
+    /// Validate that the state is safe to proceed with operations
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            VaultState::New | VaultState::Initialized => Ok(()),
+            VaultState::Corrupted(msg) => {
+                error!("Vault in corrupted state: {}", msg);
+                Err(VaultError::CorruptedVault(msg.clone()))
+            }
+            VaultState::Orphaned => {
+                error!("Orphaned counter file detected - vault missing");
+                Err(VaultError::CorruptedVault(
+                    "Counter file exists but vault is missing".into(),
+                ))
+            }
+            VaultState::Migrating {
+                from_version,
+                to_version,
+            } => {
+                warn!(
+                    from = from_version,
+                    to = to_version,
+                    "Vault requires migration"
+                );
+                Err(VaultError::UnsupportedVersion {
+                    found: *from_version,
+                    expected: *to_version,
+                })
+            }
+        }
+    }
+
+    /// Check if this is a new vault that needs initialization
+    pub fn is_new(&self) -> bool {
+        matches!(self, VaultState::New)
+    }
+
+    /// Check if vault is in a healthy state
+    pub fn is_healthy(&self) -> bool {
+        matches!(self, VaultState::New | VaultState::Initialized)
+    }
+}
+
+// Conversion from VaultError to io::Error for compatibility with existing code
+impl From<VaultError> for std::io::Error {
+    fn from(err: VaultError) -> Self {
+        match err {
+            VaultError::Io(io_err) => io_err,
+            VaultError::AuthenticationFailed => {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
+            }
+            VaultError::RollbackDetected { .. } => {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
+            }
+            VaultError::CorruptedVault(_) => {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
+            }
+            VaultError::ConcurrencyConflict => {
+                std::io::Error::new(std::io::ErrorKind::WouldBlock, err.to_string())
+            }
+            VaultError::UnsupportedVersion { .. } => {
+                std::io::Error::new(std::io::ErrorKind::Unsupported, err.to_string())
+            }
+            VaultError::InsecurePermissions { .. } => {
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, err.to_string())
+            }
+            VaultError::CounterOverflow => {
+                std::io::Error::new(std::io::ErrorKind::Other, err.to_string())
+            }
+            _ => std::io::Error::new(std::io::ErrorKind::Other, err.to_string()),
+        }
+    }
+}
+
 const VAULT_FILE: &str = "vault.enc";
 const AUDIT_FILE: &str = "vault_audit.log";
 const COUNTER_FILE: &str = "vault.counter";
@@ -94,7 +276,11 @@ impl AuditOperation {
     }
 }
 
-fn main() -> io::Result<()> {
+fn main() -> Result<()> {
+    init_logging();
+    
+    info!("Secure Secrets Storage starting");
+
     // Secure memory before handling any secrets
     secure_memory()?;
 
@@ -116,15 +302,31 @@ fn main() -> io::Result<()> {
     // Load vault with rollback protection
     let (mut vault, _counter) =
         match load_vault(VAULT_FILE, COUNTER_FILE, &passphrase, &counter_key) {
-            Ok(v) => v,
-            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-                eprintln!("Error: Invalid passphrase, corrupted vault, or tampered data.");
-                return Err(e);
+            Ok((vault, counter)) => {
+                info!(
+                    secrets_count = vault.len(),
+                    counter = counter,
+                    "Vault loaded successfully"
+                );
+
+                (vault, counter)
+            },
+            Err(VaultError::AuthenticationFailed) => {
+                error!("Wrong passphrase provided");
+                return Err(VaultError::AuthenticationFailed.into());
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                (HashMap::new(), 0) // New vault
+            Err(VaultError::RollbackDetected { vault, stored }) => {
+                error!(
+                    vault_counter = vault,
+                    stored_counter = stored,
+                    "Rollback attack detected - DO NOT PROCEED"
+                );
+                return Err(VaultError::RollbackDetected { vault, stored }.into());
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                error!(error = %e, "Failed to load vault");
+                return Err(e.into());
+            }
         };
 
     match command.as_str() {
@@ -137,25 +339,25 @@ fn main() -> io::Result<()> {
             vault.insert(key.clone(), value);
             save_vault(VAULT_FILE, COUNTER_FILE, &vault, &passphrase, &counter_key)?;
             log_audit(AUDIT_FILE, AuditOperation::SecretWrite, true, &audit_key)?;
-            println!("Secret added successfully.");
+            info!("Secret added successfully.");
         }
         "get" if args.len() == 3 => {
             let key = &args[2];
             if let Some(value) = vault.get(key) {
-                println!("{}", value.as_str());
+                info!("{}", value.as_str());
                 log_audit(AUDIT_FILE, AuditOperation::SecretRead, true, &audit_key)?;
             } else {
-                println!("Key not found.");
+                info!("Key not found.");
                 log_audit(AUDIT_FILE, AuditOperation::SecretRead, false, &audit_key)?;
             }
         }
         "list" if args.len() == 2 => {
             if vault.is_empty() {
-                println!("No secrets stored.");
+                info!("No secrets stored.");
             } else {
-                println!("Stored keys:");
+                info!("Stored keys:");
                 for key in vault.keys() {
-                    println!("  - {}", key);
+                    info!("  - {}", key);
                 }
             }
             log_audit(AUDIT_FILE, AuditOperation::VaultAccess, true, &audit_key)?;
@@ -165,9 +367,9 @@ fn main() -> io::Result<()> {
             if vault.remove(key).is_some() {
                 save_vault(VAULT_FILE, COUNTER_FILE, &vault, &passphrase, &counter_key)?;
                 log_audit(AUDIT_FILE, AuditOperation::SecretDelete, true, &audit_key)?;
-                println!("Secret deleted successfully.");
+                info!("Secret deleted successfully.");
             } else {
-                println!("Key not found.");
+                info!("Key not found.");
                 log_audit(AUDIT_FILE, AuditOperation::SecretDelete, false, &audit_key)?;
             }
         }
@@ -176,7 +378,7 @@ fn main() -> io::Result<()> {
             let confirm = SecureString::new(prompt_password("Confirm new passphrase: ")?);
 
             if new_passphrase.as_str() != confirm.as_str() {
-                println!("Passphrases do not match.");
+                info!("Passphrases do not match.");
                 return Ok(());
             }
 
@@ -186,15 +388,15 @@ fn main() -> io::Result<()> {
             // Rekey operations in order (most critical first)
             // 1. Rekey counter (CRITICAL - must succeed or abort)
             rekey_counter(COUNTER_FILE, &counter_key, &new_counter_key).map_err(|e| {
-                eprintln!("Failed to rekey counter file: {}", e);
-                eprintln!("Passphrase change ABORTED - vault unchanged");
+                error!("Failed to rekey counter file: {}", e);
+                error!("Passphrase change ABORTED - vault unchanged");
                 e
             })?;
 
             // 2. Rekey audit log (can continue if fails)
             if let Err(e) = rekey_audit_log(AUDIT_FILE, &audit_key, &new_audit_key) {
-                eprintln!("Warning: Failed to rekey audit log: {}", e);
-                eprintln!("Continuing with passphrase change...");
+                error!("Warning: Failed to rekey audit log: {}", e);
+                error!("Continuing with passphrase change...");
             }
 
             // 3. Save vault with new passphrase
@@ -230,7 +432,7 @@ fn main() -> io::Result<()> {
                 &passphrase,
             )?;
             log_audit(AUDIT_FILE, AuditOperation::VaultAccess, true, &audit_key)?;
-            println!("Backup created successfully at: {}", backup_path);
+            info!("Backup created successfully at: {}", backup_path);
         }
         "restore" if args.len() == 3 => {
             let backup_path = &args[2];
@@ -242,17 +444,17 @@ fn main() -> io::Result<()> {
                 &passphrase,
             )?;
             log_audit(AUDIT_FILE, AuditOperation::VaultAccess, true, &audit_key)?;
-            println!("Vault restored successfully from: {}", backup_path);
+            info!("Vault restored successfully from: {}", backup_path);
         }
         "verify" if args.len() == 2 => {
             verify_vault(VAULT_FILE, COUNTER_FILE, &passphrase, &counter_key)?;
-            println!("✓ Vault integrity verified successfully");
+            info!("✓ Vault integrity verified successfully");
         }
         "export" if args.len() == 3 => {
             let export_path = &args[2];
             export_vault_plaintext(&vault, export_path)?;
             log_audit(AUDIT_FILE, AuditOperation::VaultAccess, true, &audit_key)?;
-            println!(
+            info!(
                 "⚠️  WARNING: Secrets exported in PLAINTEXT to: {}",
                 export_path
             );
@@ -264,10 +466,10 @@ fn main() -> io::Result<()> {
             vault.extend(imported);
             save_vault(VAULT_FILE, COUNTER_FILE, &vault, &passphrase, &counter_key)?;
             log_audit(AUDIT_FILE, AuditOperation::VaultAccess, true, &audit_key)?;
-            println!("Secrets imported successfully");
+            info!("Secrets imported successfully");
         }
         _ => {
-            println!("Invalid command or arguments.");
+            error!("Invalid command or arguments.");
             print_usage();
         }
     }
@@ -296,6 +498,22 @@ fn print_usage() {
     println!("  - Rollback attack protection");
     println!("  - Encrypted audit logging");
     println!("  - Memory zeroization");
+}
+
+pub fn init_logging() {
+    use tracing_subscriber::{fmt, filter::EnvFilter};
+
+    fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info"))
+        )
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_file(true)
+        .with_line_number(true)
+        .compact()
+        .init();
 }
 
 // Prevent core dumps and lock memory pages (Unix only)
@@ -586,22 +804,47 @@ fn save_vault(
     passphrase: &SecureString,
     counter_key: &SecureBytes,
 ) -> io::Result<u64> {
+    info!(
+        vault = %vault_file,
+        secrets_count = vault.len(),
+        "Saving vault"
+    );
+
+    // Validate vault state before saving
+    let state = VaultState::check(vault_file, counter_file);
+    if !state.is_healthy() && !state.is_new() {
+        warn!(?state, "Vault in unhealthy state, proceeding with caution");
+    }
+
     let data = serialize_vault(vault)?;
+    debug!(size_bytes = data.len(), "Vault serialized");
 
     // Acquire exclusive lock on counter file
     let counter_file_handle = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
-        .open(counter_file)?;
+        .open(counter_file)
+        .map_err(|e| {
+            error!(file = %counter_file, error = %e, "Failed to open counter file");
+            e
+        })?;
 
-    lock_file_exclusive(&counter_file_handle)?;
+    lock_file_exclusive(&counter_file_handle).map_err(|e| {
+        error!(error = %e, "Failed to acquire exclusive lock on counter");
+        VaultError::ConcurrencyConflict
+    })?;
 
     // Read current counter
     let current_counter = read_counter_locked(&counter_file_handle, counter_key)?;
     let new_counter = current_counter
         .checked_add(1)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Counter overflow"))?;
+        .ok_or(VaultError::CounterOverflow)?;
+    debug!(
+        old = current_counter,
+        new = new_counter,
+        "Incrementing counter"
+    );
 
     // Prepare encrypted vault data
     let temp_file = format!("{}.tmp.{}", vault_file, new_counter);
@@ -668,6 +911,7 @@ fn save_vault(
     match save_result {
         Ok(()) => {
             // Atomic rename
+            debug!(from = %temp_file, to = %vault_file, "Performing atomic rename");
             match std::fs::rename(&temp_file, vault_file) {
                 Ok(()) => {
                     // Update counter only after successful vault write
@@ -682,10 +926,12 @@ fn save_vault(
                         }
                     }
 
+                    info!(counter = new_counter, "Vault saved successfully");
                     Ok(new_counter)
                 }
                 Err(e) => {
                     // Rename failed - clean up temp file
+                    error!(error = %e, "Atomic rename failed, cleaning up");
                     let _ = std::fs::remove_file(&temp_file);
                     Err(e)
                 }
@@ -693,6 +939,7 @@ fn save_vault(
         }
         Err(e) => {
             // Save failed - clean up temp file
+            error!(error = %e, "Failed to write temp file, cleaning up");
             let _ = std::fs::remove_file(&temp_file);
             Err(e)
         }
@@ -707,39 +954,59 @@ fn load_vault(
     counter_file: &str,
     passphrase: &SecureString,
     counter_key: &SecureBytes,
-) -> io::Result<(HashMap<String, SecureString>, u64)> {
-    let vault_path = Path::new(vault_file);
+) -> Result<(HashMap<String, SecureString>, u64)> {
+    info!(
+        vault = %vault_file,
+        counter = %counter_file,
+        "Loading vault"
+    );
+    let state = VaultState::check(vault_file, counter_file);
+    debug!(?state, "Vault state detected");
 
-    // Handle brand new vault (neither file exists)
-    if !vault_path.exists() {
-        if Path::new(counter_file).exists() {
-            // Counter exists but vault doesn't - data loss scenario
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "SECURITY: Counter file exists but vault file missing - possible data loss",
-            ));
-        }
-        // Brand new vault
+    state.validate()?;
+
+    if state.is_new() {
+        info!("Initializing new vault");
         return Ok((HashMap::new(), 0));
     }
 
+    // STEP 4: Load existing vault with full verification
+    debug!("Loading existing vault with rollback protection");
     // STEP 1: Acquire exclusive lock on counter file FIRST
     // This prevents any other process from updating the counter during our operation
     let counter_file_handle = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
-        .open(counter_file)?;
+        .open(counter_file)
+        .map_err(|e| {
+            error!(file = %counter_file, error = %e, "Failed to open counter file");
+            e
+        })?;
 
-    lock_file_exclusive(&counter_file_handle)?;
+    lock_file_exclusive(&counter_file_handle).map_err(|e| {
+        error!(error = %e, "Failed to acquire lock on counter file");
+        VaultError::ConcurrencyConflict
+    })?;
 
     // STEP 2: Read stored counter while holding exclusive lock
     let stored_counter = read_counter_locked(&counter_file_handle, counter_key)?;
 
-    // STEP 3: Open and lock vault file with shared lock (allows concurrent reads)
-    let vault_file_handle = OpenOptions::new().read(true).open(vault_file)?;
+    debug!(counter = stored_counter, "Read stored counter");
 
-    lock_file_shared(&vault_file_handle)?;
+    // STEP 3: Open and lock vault file with shared lock (allows concurrent reads)
+    let vault_file_handle = OpenOptions::new()
+        .read(true)
+        .open(vault_file)
+        .map_err(|e| {
+            error!(file = %vault_file, error = %e, "Failed to open vault file");
+            e
+        })?;
+
+    lock_file_shared(&vault_file_handle).map_err(|e| {
+        error!(error = %e, "Failed to acquire shared lock on vault");
+        VaultError::ConcurrencyConflict
+    })?;
 
     // STEP 4: Verify vault file permissions (Unix only)
     #[cfg(unix)]
@@ -747,36 +1014,45 @@ fn load_vault(
         let metadata = vault_file_handle.metadata()?;
         let mode = metadata.permissions().mode() & 0o777;
         if mode != 0o600 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "SECURITY: Insecure vault permissions {:o} (expected 0600)",
-                    mode
-                ),
-            ));
+            error!(
+                file = %vault_file,
+                mode = format!("{:o}", mode),
+                "Insecure vault file permissions"
+            );
+            return Err(VaultError::InsecurePermissions { mode }.into());
         }
     }
 
     // STEP 5: Read vault counter from vault file header
     let (vault_counter, vault_data) = read_vault_counter_from_file(&vault_file_handle)?;
+    debug!(counter = vault_counter, "Read vault counter from file");
 
     // STEP 6: Verify no rollback while holding both locks
     if vault_counter < stored_counter {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "SECURITY: Rollback attack detected! Vault counter {} < stored counter {}",
-                vault_counter, stored_counter
-            ),
-        ));
+        error!(
+            vault_counter = vault_counter,
+            stored_counter = stored_counter,
+            "Rollback attack detected"
+        );
+        return Err(VaultError::RollbackDetected {
+            vault: vault_counter,
+            stored: stored_counter,
+        }.into());
     }
 
     // STEP 7: Decrypt and authenticate vault
+    debug!("Decrypting and authenticating vault");
     let vault = decrypt_vault(&vault_data, passphrase)?;
+    info!(secrets_count = vault.len(), "Vault loaded successfully");
 
     // STEP 8: Update stored counter atomically if vault counter is newer
     // This handles the case where a previous update succeeded but counter write failed
     if vault_counter > stored_counter {
+        warn!(
+            old = stored_counter,
+            new = vault_counter,
+            "Updating stored counter to match vault"
+        );
         write_counter_locked(&counter_file_handle, vault_counter, counter_key)?;
     }
 
@@ -1114,7 +1390,7 @@ fn rekey_counter(
 ///
 /// This function assumes the caller holds an exclusive lock on the file.
 /// Returns the counter value, or 0 if file is empty (new vault).
-fn read_counter_locked(file: &File, auth_key: &SecureBytes) -> io::Result<u64> {
+fn read_counter_locked(file: &File, auth_key: &SecureBytes) -> Result<u64> {
     let metadata = file.metadata()?;
 
     // Empty file = new vault, counter starts at 0
@@ -1124,14 +1400,16 @@ fn read_counter_locked(file: &File, auth_key: &SecureBytes) -> io::Result<u64> {
 
     // Expected format: [8 bytes counter][32 bytes HMAC]
     if metadata.len() != (COUNTER_SIZE + 32) as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "Invalid counter file size: {} (expected {})",
-                metadata.len(),
-                COUNTER_SIZE + 32
-            ),
-        ));
+        let message = format!(
+            "Invalid counter file size: {} (expected {})",
+            metadata.len(),
+            COUNTER_SIZE + 32
+        );
+        error!(
+            message = message,
+        );
+
+        return Err(VaultError::InvalidDataFormat(message));
     }
 
     // Read entire file content
@@ -1144,14 +1422,15 @@ fn read_counter_locked(file: &File, auth_key: &SecureBytes) -> io::Result<u64> {
 
     // Verify HMAC to ensure counter hasn't been tampered with
     let mut mac = <HmacSha256 as Mac>::new_from_slice(auth_key.as_slice())
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "HMAC init failed"))?;
+        .map_err(|_| VaultError::Hmac("HMAC init failed".into()))?;
     mac.update(counter_bytes);
 
     mac.verify_slice(stored_hmac).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Counter file HMAC verification failed - file may be corrupted or tampered",
-        )
+        let message = "Counter file HMAC verification failed - file may be corrupted or tampered";
+        error!(
+            message = message,
+        );
+        VaultError::InvalidDataFormat(message.into())
     })?;
 
     // Convert bytes to u64
@@ -1327,7 +1606,7 @@ fn backup_vault(
     // Calculate HMAC over entire backup
     let backup_key = derive_backup_key(passphrase)?;
     let mut mac = <HmacSha256 as Mac>::new_from_slice(backup_key.as_slice())
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "HMAC init failed"))?;
+        .map_err(|_| VaultError::Hmac("HMAC init failed".into()))?;
     mac.update(&backup_content);
     let hmac_result = mac.finalize();
     let hmac_bytes = hmac_result.into_bytes();
@@ -1341,7 +1620,7 @@ fn backup_vault(
         .open(&temp)?;
 
     file.write_all(b"VAULTBAK")?; // Magic header
-    file.write_all(&[2u8])?; // Backup format version
+    file.write_all(&[VERSION])?; // Backup format version
     file.write_all(&backup_content)?;
     file.write_all(&hmac_bytes)?;
     file.sync_all()?;
@@ -1411,7 +1690,7 @@ fn restore_vault(
 
     let mut version = [0u8; 1];
     file.read_exact(&mut version)?;
-    if version[0] != 2 {
+    if version[0] != VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Unsupported backup version: {}", version[0]),
@@ -1764,7 +2043,7 @@ mod tests {
         let result = load_vault(&vault_file, &counter_file, &wrong, &wrong_counter_key);
 
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(matches!(result.unwrap_err(), VaultError::InvalidDataFormat(_message)));
 
         cleanup(&vault_file, &counter_file, &audit_file);
     }
@@ -1978,7 +2257,7 @@ mod backup_tests {
         counter: String,
         audit: String,
         backup: String,
-        export: String
+        export: String,
     }
 
     fn get_test_files() -> TestFiles {
@@ -2006,6 +2285,30 @@ mod backup_tests {
         let _ = fs::remove_file(format!("{}.tmp", audit));
         let _ = fs::remove_file(format!("{}.tmp", backup));
         let _ = fs::remove_file(format!("{}.pre-restore", vault));
+    }
+
+    #[test]
+    fn test_vault_state_new() {
+        let state = VaultState::check("nonexistent.enc", "nonexistent.counter");
+        assert_eq!(state, VaultState::New);
+        assert!(state.is_new());
+        assert!(state.is_healthy());
+    }
+
+    #[test]
+    fn test_vault_state_validation() {
+        let corrupted = VaultState::Corrupted("test error".into());
+        assert!(corrupted.validate().is_err());
+        assert!(!corrupted.is_healthy());
+    }
+
+    #[test]
+    fn test_error_types() {
+        let err = VaultError::RollbackDetected {
+            vault: 5,
+            stored: 10,
+        };
+        assert!(err.to_string().contains("Rollback attack"));
     }
 
     #[test]
@@ -2046,7 +2349,10 @@ mod backup_tests {
             &passphrase,
         )
         .unwrap();
-        assert!(Path::new(&files.backup).exists(), "Backup file should exist");
+        assert!(
+            Path::new(&files.backup).exists(),
+            "Backup file should exist"
+        );
 
         // Modify vault
         vault.insert(
@@ -2149,7 +2455,10 @@ mod backup_tests {
 
         // Export to plaintext (skip confirmation in tests)
         export_vault_plaintext_internal(&vault, &files.export, true).unwrap();
-        assert!(Path::new(&files.export).exists(), "Export file should exist");
+        assert!(
+            Path::new(&files.export).exists(),
+            "Export file should exist"
+        );
 
         // Read and verify export format
         let export_content = fs::read_to_string(&files.export).unwrap();
@@ -2210,17 +2519,18 @@ mod backup_tests {
 
         // Attempting to load vault with wrong passphrase should fail
         let wrong_counter_key = derive_counter_key(&wrong_pass).unwrap();
-        let load_result = load_vault(&files.vault, &files.counter, &wrong_pass, &wrong_counter_key);
+        let load_result = load_vault(
+            &files.vault,
+            &files.counter,
+            &wrong_pass,
+            &wrong_counter_key,
+        );
         assert!(load_result.is_err(), "Should fail with wrong passphrase");
 
         // Verify the error is related to authentication/decryption
         match load_result {
             Err(e) => {
-                assert_eq!(
-                    e.kind(),
-                    io::ErrorKind::InvalidData,
-                    "Wrong passphrase should result in InvalidData error"
-                );
+                assert!(matches!(e, VaultError::InvalidDataFormat(_message)));
             }
             Ok(_) => panic!("Should have failed with wrong passphrase"),
         }
@@ -2446,7 +2756,10 @@ mod backup_tests {
         );
 
         // Final backup should exist
-        assert!(Path::new(&files.backup).exists(), "Backup file should exist");
+        assert!(
+            Path::new(&files.backup).exists(),
+            "Backup file should exist"
+        );
 
         cleanup_all(
             &files.vault,
