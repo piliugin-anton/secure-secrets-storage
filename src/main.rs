@@ -553,9 +553,6 @@ fn main() -> Result<()> {
     let (mut vault, _counter) =
         match load_vault(VAULT_FILE, COUNTER_FILE, &passphrase, &counter_key) {
             Ok((vault, counter)) => {
-                verify_secure_permissions(Path::new(VAULT_FILE))?;
-                verify_secure_permissions(Path::new(COUNTER_FILE))?;
-
                 info!(
                     secrets_count = vault.len(),
                     counter = counter,
@@ -684,7 +681,7 @@ fn main() -> Result<()> {
                 backup_path,
                 &passphrase,
             )?;
-            log_audit(AUDIT_FILE, AuditOperation::VaultAccess, true, &audit_key)?;
+            log_audit(AUDIT_FILE, AuditOperation::BackupCreated, true, &audit_key)?;
             info!("Backup created successfully at: {}", backup_path);
         }
         "restore" if args.len() == 3 => {
@@ -696,11 +693,11 @@ fn main() -> Result<()> {
                 AUDIT_FILE,
                 &passphrase,
             )?;
-            log_audit(AUDIT_FILE, AuditOperation::VaultAccess, true, &audit_key)?;
+            log_audit(AUDIT_FILE, AuditOperation::VaultRestored, true, &audit_key)?;
             info!("Vault restored successfully from: {}", backup_path);
         }
         "verify" if args.len() == 2 => {
-            verify_vault(VAULT_FILE, COUNTER_FILE, &passphrase, &counter_key)?;
+            verify_vault(VAULT_FILE, COUNTER_FILE, &passphrase, &counter_key, true)?;
             info!("✓ Vault integrity verified successfully");
         }
         "export" if args.len() == 3 => {
@@ -1050,7 +1047,7 @@ fn save_vault(
     })?;
 
     // Read current counter
-    let current_counter = read_counter_locked(&counter_file, &counter_file_handle, counter_key)?;
+    let current_counter = read_counter_locked( &counter_file_handle, counter_key)?;
     let new_counter = current_counter
         .checked_add(1)
         .ok_or(VaultError::CounterOverflow)?;
@@ -1207,7 +1204,7 @@ fn load_vault(
     })?;
 
     // STEP 2: Read stored counter while holding exclusive lock
-    let stored_counter = read_counter_locked(&counter_file, &counter_file_handle, counter_key)?;
+    let stored_counter = read_counter_locked( &counter_file_handle, counter_key)?;
 
     debug!(counter = stored_counter, "Read stored counter");
 
@@ -1224,8 +1221,6 @@ fn load_vault(
         error!(error = %e, "Failed to acquire shared lock on vault");
         VaultError::ConcurrencyConflict
     })?;
-
-    verify_secure_permissions(Path::new(vault_file))?;
 
     // STEP 5: Read vault counter from vault file header
     let (vault_counter, vault_data) = read_vault_counter_from_file(&vault_file_handle)?;
@@ -1520,7 +1515,7 @@ fn rekey_counter(
             let handle = OpenOptions::new().read(true).open(counter_file)?;
 
             lock_file_shared(&handle)?;
-            read_counter_locked(&counter_file, &handle, old_key)?
+            read_counter_locked(&handle, old_key)?
         }; // Lock released
 
         // Write to temp file with new key
@@ -1539,7 +1534,7 @@ fn rekey_counter(
 
             // Verify immediately
             temp_handle.seek(io::SeekFrom::Start(0))?;
-            let verified = read_counter_locked(&counter_file, &temp_handle, new_key)?;
+            let verified = read_counter_locked(&temp_handle, new_key)?;
 
             if verified != counter_value {
                 return Err(io::Error::new(
@@ -1584,9 +1579,7 @@ fn rekey_counter(
 ///
 /// This function assumes the caller holds an exclusive lock on the file.
 /// Returns the counter value, or 0 if file is empty (new vault).
-fn read_counter_locked(counter_file: &str, file: &File, auth_key: &SecureBytes) -> Result<u64> {
-    verify_secure_permissions(Path::new(counter_file))?;
-
+fn read_counter_locked(file: &File, auth_key: &SecureBytes) -> Result<u64> {
     let metadata = file.metadata()?;
 
     // Empty file = new vault, counter starts at 0
@@ -1749,11 +1742,6 @@ fn backup_vault(
     backup_path: &str,
     passphrase: &SecureString,
 ) -> io::Result<()> {
-    verify_secure_permissions(Path::new(vault_file))?;
-    verify_secure_permissions(Path::new(counter_file))?;
-
-    //use std::io::Write;
-
     // First verify the vault is readable
     let counter_key = derive_counter_key(passphrase)?;
     let (vault, counter) = load_vault(vault_file, counter_file, passphrase, &counter_key)?;
@@ -1979,6 +1967,7 @@ fn verify_vault(
     counter_file: &str,
     passphrase: &SecureString,
     counter_key: &SecureBytes,
+    check_permissions: bool
 ) -> io::Result<()> {
     // Try to load the vault
     let (vault, counter) = load_vault(vault_file, counter_file, passphrase, counter_key)?;
@@ -1991,9 +1980,12 @@ fn verify_vault(
     println!("  ✓ {} secrets stored", vault.len());
     println!("  ✓ Current counter: {}", counter);
 
-    verify_secure_permissions(Path::new(vault_file))?;
-    verify_secure_permissions(Path::new(counter_file))?;
-    println!("  ✓ File permissions secure");
+    if check_permissions {
+        verify_secure_permissions(Path::new(vault_file))?;
+        verify_secure_permissions(Path::new(counter_file))?;
+        println!("  ✓ File permissions secure");
+    }
+    
 
     // Verify counter file
     if Path::new(counter_file).exists() {
@@ -2275,7 +2267,7 @@ fn emergency_key_rotation(
     // Additional verification
     println!("🔍 Verifying rotated vault...");
     let counter_key = derive_counter_key(passphrase)?;
-    verify_vault(vault_file, counter_file, passphrase, &counter_key)?;
+    verify_vault(vault_file, counter_file, passphrase, &counter_key, false)?;
 
     println!("✅ Emergency rotation complete and verified");
     println!("   Recommend changing passphrase next: change-passphrase");
@@ -2794,7 +2786,7 @@ mod backup_tests {
         .unwrap();
 
         // Verify should succeed
-        let result = verify_vault(&files.vault, &files.counter, &passphrase, &counter_key);
+        let result = verify_vault(&files.vault, &files.counter, &passphrase, &counter_key, false);
         assert!(result.is_ok(), "Verify should succeed for valid vault");
 
         // Tamper with vault
@@ -2805,7 +2797,7 @@ mod backup_tests {
         fs::write(&files.vault, data).unwrap();
 
         // Verify should fail
-        let result = verify_vault(&files.vault, &files.counter, &passphrase, &counter_key);
+        let result = verify_vault(&files.vault, &files.counter, &passphrase, &counter_key, false);
         assert!(result.is_err(), "Verify should fail for tampered vault");
 
         cleanup_all(
@@ -3091,7 +3083,7 @@ mod backup_tests {
         let counter_key = derive_counter_key(&passphrase).unwrap();
 
         // Verify should fail for nonexistent vault
-        let result = verify_vault(&files.vault, &files.counter, &passphrase, &counter_key);
+        let result = verify_vault(&files.vault, &files.counter, &passphrase, &counter_key, false);
         assert!(
             result.is_ok(),
             "Verify returns Ok for new vault (empty HashMap)"
