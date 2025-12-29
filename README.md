@@ -256,7 +256,7 @@ Select user role:
 | **ReadWrite** | ✅ | ✅ | ✅ | ❌ |
 | **ReadOnly** | ✅ | ❌ | ❌ | ❌ |
 
-## 2. Start API server
+#### 2. Start API server
 ```bash
 secure-secrets-storage api
 Enter passphrase: ****
