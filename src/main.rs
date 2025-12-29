@@ -1,7 +1,11 @@
 use std::env;
 use std::io;
 use rpassword::prompt_password;
+use rprompt::prompt_reply;
+use secure_secrets_storage::api_auth::UserRole;
+use secure_secrets_storage::api_auth::add_user_cli;
 use secure_secrets_storage::api_auth::init_user_database;
+use secure_secrets_storage::api_auth::list_users_cli;
 use secure_secrets_storage::vault::AuditOperation;
 use secure_secrets_storage::vault::SecureString;
 use secure_secrets_storage::vault::VaultError;
@@ -46,6 +50,8 @@ fn print_usage() {
     println!("  check-permissions   - Verify and fix file permissions");
     println!("\n🔐 Multi-User API Server:");
     println!("  init-users <admin_username>  - Initialize user database");
+    println!("  list-users                   - List all users");
+    println!("  add-user <username>          - Add new user");
     println!("  api [addr]                   - Start secure API server (default: 127.0.0.1:6666)");
     println!("\nSecurity features:");
     println!("  - XChaCha20-Poly1305 encryption");
@@ -102,6 +108,15 @@ fn secure_memory() -> io::Result<()> {
     Ok(())
 }
 
+fn compare_passphrases(passphrase: &SecureString, passphrase_repeat: &SecureString) -> Result<(), io::Error> {
+    if passphrase.as_str() != passphrase_repeat.as_str() {
+        let error_message = "Passphrases do not match.";
+        error!(error_message);
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, error_message).into());
+    }
+
+    Ok(())
+}
 
 
 fn main() -> secure_secrets_storage::vault::Result<()> {
@@ -119,30 +134,71 @@ fn main() -> secure_secrets_storage::vault::Result<()> {
     }
 
     let command = &args[1];
-    
-    // Prompt passphrase securely (no echo)
-    let passphrase = SecureString::new(prompt_password("Enter passphrase: ")?);
 
-    if command == "init-users" && args.len() == 3 {
+    match command.as_str() {
+        "init-users" if args.len() == 3 => {
+            // Prompt passphrase securely (no echo)
+            let master_passphrase = SecureString::new(prompt_password("Enter master passphrase: ")?);
+            let master_passphrase_repeat = SecureString::new(prompt_password("Repeat master passphrase: ")?);
+            compare_passphrases(&master_passphrase, &master_passphrase_repeat)?;
+            let admin_passphrase = SecureString::new(prompt_password("Enter admin passphrase: ")?);
+            let admin_passphrase_repeat = SecureString::new(prompt_password("Repeat admin passphrase: ")?);
+            compare_passphrases(&admin_passphrase, &admin_passphrase_repeat)?;
             let admin_username = args[2].clone();
-            init_user_database(USER_DB_FILE, &passphrase, admin_username, passphrase.as_str())?;
+            init_user_database(USER_DB_FILE, &master_passphrase, admin_username, admin_passphrase.as_str())?;
             info!("User database initialized successfully.");
             return Ok(());
-    }
+        }
+        "add-user" if args.len() == 3 => {
+            // Prompt passphrase securely (no echo)
+            let master_passphrase = SecureString::new(prompt_password("Enter master passphrase: ")?);
+            let username = args[2].clone();
+            let password = SecureString::new(prompt_password("Enter user password: ")?);
+            let password_repeat = SecureString::new(prompt_password("Repeat user password: ")?);
+            compare_passphrases(&password, &password_repeat)?;
+            let vault_passphrase = SecureString::new(prompt_password("Enter vault passphrase: ")?);
+            let vault_passphrase_repeat = SecureString::new(prompt_password("Repeat vault password: ")?);
+            compare_passphrases(&vault_passphrase, &vault_passphrase_repeat)?;
+            let eol = if cfg!(windows) { "\r\n" } else { "\n" };
+            let choices = format!("Select user role:{eol}\t1. Admin{eol}\t2. Read-only{eol}\t3. Read + Write{eol}> ");
+            let choice = prompt_reply(choices)?;
+            let role = match choice.as_str() {
+                "1" => UserRole::Admin,
+                "2" => UserRole::ReadOnly,
+                "3" => UserRole::ReadWrite,
+                _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid choice").into()),
+            };
+            add_user_cli(USER_DB_FILE, &master_passphrase, username, password.as_str(), role, &vault_passphrase)?;
+            info!("User added successfully.");
+            return Ok(());
+        }
+        "list-users" => {
+            // Prompt passphrase securely (no echo)
+            let master_passphrase = SecureString::new(prompt_password("Enter master passphrase: ")?);
+            
+            list_users_cli(USER_DB_FILE, &master_passphrase)?;
+            return Ok(());
+        }
+        "api" => {
+            // Prompt passphrase securely (no echo)
+            let master_passphrase = SecureString::new(prompt_password("Enter master passphrase: ")?);
+            let bind_address = args.get(2).map(|s| s.as_str()).unwrap_or("127.0.0.1:6666");
 
-    if command == "api" {
-        let bind_address = args.get(2).map(|s| s.as_str()).unwrap_or("127.0.0.1:6666");
+            return api::run_api_server(
+                VAULT_FILE.to_string(),
+                COUNTER_FILE.to_string(),
+                AUDIT_FILE.to_string(),
+                USER_DB_FILE.to_string(),
+                master_passphrase,
+                bind_address,
+            )
+            .map_err(|e| VaultError::Io(e));
+        }
+        _ => {}
+    };
 
-        return api::run_api_server(
-            VAULT_FILE.to_string(),
-            COUNTER_FILE.to_string(),
-            AUDIT_FILE.to_string(),
-            USER_DB_FILE.to_string(),
-            passphrase,
-            bind_address,
-        )
-        .map_err(|e| VaultError::Io(e));
-    }
+    // Prompt passphrase securely (no echo)
+    let passphrase = SecureString::new(prompt_password("Enter vault passphrase: ")?);
 
     // Derive audit key from passphrase
     let audit_key = derive_audit_key(&passphrase)?;
