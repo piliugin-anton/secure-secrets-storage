@@ -199,6 +199,53 @@ Output:
   Master vault passphrase: AbCd1234EfGh5678IjKl...
   ⚠️  SAVE THIS PASSPHRASE - needed for vault operations!
 
+### CLI User Management
+```bash
+# List all users (requires master passphrase)
+secure-secrets-storage list-users
+Enter master passphrase: ****
+
+Output:
+=== Users ===
+  • admin (Admin)
+    ID: 550e8400-e29b-41d4-a716-446655440000
+    Created: 2025-12-29 10:00:00 UTC
+    Last login: 2025-12-29 14:30:00 UTC
+    Login count: 5
+
+  • alice (ReadWrite)
+    ID: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+    Created: 2025-12-29 14:45:00 UTC
+    Last login: 2025-12-29 15:20:00 UTC
+    Login count: 3
+
+  • bob (ReadOnly) [LOCKED]
+    ID: 9b2d5e8a-3c4f-4a5b-8d6e-1f2a3b4c5d6e
+    Created: 2025-12-29 16:00:00 UTC
+    Last login: None
+    Login count: 0
+
+# Add new user via CLI (requires master passphrase and vault passphrase)
+secure-secrets-storage add-user alice
+Enter master passphrase: ****
+Enter user password: ****
+Repeat user password: ****
+Enter vault passphrase: ****
+Repeat vault passphrase: ****
+Select user role:
+  1. Admin
+  2. Read-only
+  3. Read + Write
+> 3
+✓ User 'alice' created with role ReadWrite
+
+# Add user with different roles
+secure-secrets-storage add-user bob
+secure-secrets-storage add-user charlie
+```
+
+**Available roles:** `Admin`, `ReadWrite`, `ReadOnly`
+
 # 2. Start API server
 secure-secrets-storage api
 Enter passphrase: ****
