@@ -169,7 +169,7 @@ fn main() -> secure_secrets_storage::vault::Result<()> {
             compare_passphrases(&password, &password_repeat)?;
             let vault_passphrase = SecureString::new(prompt_password("Enter vault passphrase: ")?);
             let vault_passphrase_repeat =
-                SecureString::new(prompt_password("Repeat vault password: ")?);
+                SecureString::new(prompt_password("Repeat vault passphrase: ")?);
             compare_passphrases(&vault_passphrase, &vault_passphrase_repeat)?;
             let eol = if cfg!(windows) { "\r\n" } else { "\n" };
             let choices = format!(
