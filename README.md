@@ -249,12 +249,6 @@ Select user role:
 ✓ User 'alice' created with role ReadWrite
 ```
 
-# Add user with different roles
-```bash
-secure-secrets-storage add-user bob
-secure-secrets-storage add-user charlie
-```
-
 **Available roles:** `Admin`, `ReadWrite`, `ReadOnly`
 
 # 2. Start API server
