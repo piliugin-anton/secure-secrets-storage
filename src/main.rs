@@ -123,6 +123,13 @@ fn main() -> secure_secrets_storage::vault::Result<()> {
     // Prompt passphrase securely (no echo)
     let passphrase = SecureString::new(prompt_password("Enter passphrase: ")?);
 
+    if command == "init-users" && args.len() == 3 {
+            let admin_username = args[2].clone();
+            init_user_database(USER_DB_FILE, &passphrase, admin_username, passphrase.as_str())?;
+            info!("User database initialized successfully.");
+            return Ok(());
+    }
+
     if command == "api" {
         let bind_address = args.get(2).map(|s| s.as_str()).unwrap_or("127.0.0.1:6666");
 
@@ -321,7 +328,6 @@ fn main() -> secure_secrets_storage::vault::Result<()> {
             log_audit(AUDIT_FILE, AuditOperation::KeyRotation, true, &audit_key)?;
             info!("Encryption keys rotated successfully");
         }
-
         "emergency-rotate" if args.len() == 2 => {
             emergency_key_rotation(VAULT_FILE, COUNTER_FILE, AUDIT_FILE, &passphrase)?;
             log_audit(
@@ -332,7 +338,6 @@ fn main() -> secure_secrets_storage::vault::Result<()> {
             )?;
             info!("Emergency keys rotated successfully");
         }
-
         "check-permissions" if args.len() == 2 => {
             check_and_fix_permissions(VAULT_FILE, COUNTER_FILE, AUDIT_FILE)?;
             log_audit(
@@ -342,12 +347,7 @@ fn main() -> secure_secrets_storage::vault::Result<()> {
                 &audit_key,
             )?;
         }
-        "init-users" if args.len() == 3 => {
-            let admin_username = args[2].clone();
-            let admin_password = SecureString::new(prompt_password("Enter admin password: ")?);
-            init_user_database(USER_DB_FILE, &passphrase, admin_username, admin_password.as_str())?;
-            info!("User database initialized successfully.");
-        }
+        
         _ => {
             error!("Invalid command or arguments.");
             print_usage();
