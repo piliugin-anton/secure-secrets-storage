@@ -31,6 +31,14 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 chrono = "0.4.42"
 rprompt = "2.2.0"
 
+# API
+actix-web = "4.12.1"
+actix-rt = "2.11.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.148"
+uuid = { version = "1.19.0", features = ["v4", "serde"] }
+serde_bytes = "0.11.19"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
