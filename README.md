@@ -189,23 +189,30 @@ The vault now supports multi-user access via a secure REST API with role-based p
 ### Initial Setup
 
 # 1. Initialize user database with admin account
+```bash
 secure-secrets-storage init-users admin
 Enter admin password: ****
 Enter passphrase (for user DB): ****
+```
 
 Output:
+```bash
 ✓ User database initialized
   Admin user created
   Master vault passphrase: AbCd1234EfGh5678IjKl...
   ⚠️  SAVE THIS PASSPHRASE - needed for vault operations!
+```
 
 ### CLI User Management
 
 # List all users (requires master passphrase)
+```bash
 secure-secrets-storage list-users
 Enter master passphrase: ****
+```
 
 Output:
+```bash
 === Users ===
   • admin (Admin)
     ID: 550e8400-e29b-41d4-a716-446655440000
@@ -224,8 +231,10 @@ Output:
     Created: 2025-12-29 16:00:00 UTC
     Last login: None
     Login count: 0
+```
 
 # Add new user via CLI (requires master passphrase and vault passphrase)
+```bash
 secure-secrets-storage add-user alice
 Enter master passphrase: ****
 Enter user password: ****
@@ -238,10 +247,13 @@ Select user role:
   3. Read + Write
 > 3
 ✓ User 'alice' created with role ReadWrite
+```
 
 # Add user with different roles
+```bash
 secure-secrets-storage add-user bob
 secure-secrets-storage add-user charlie
+```
 
 **Available roles:** `Admin`, `ReadWrite`, `ReadOnly`
 
