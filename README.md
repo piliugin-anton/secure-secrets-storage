@@ -191,7 +191,7 @@ The vault now supports multi-user access via a secure REST API with role-based p
 # 1. Initialize user database with admin account
 secure-secrets-storage init-users admin
 Enter admin password: ****
-Enter master passphrase (for user DB): ****
+Enter passphrase (for user DB): ****
 
 Output:
 ✓ User database initialized
@@ -201,7 +201,7 @@ Output:
 
 # 2. Start API server
 secure-secrets-storage api
-Enter master passphrase: ****
+Enter passphrase: ****
 
 Output:
 🔐 Starting Secure Vault API Server
