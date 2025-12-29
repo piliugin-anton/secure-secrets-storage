@@ -182,6 +182,192 @@ Enter passphrase: ****
    Audit log ... ✅ OK
 ```
 
+## Multi-User API Server (WIP)
+
+The vault now supports multi-user access via a secure REST API with role-based permissions.
+
+### Initial Setup
+```bash
+# 1. Initialize user database with admin account
+secure-secrets-storage init-users admin
+Enter admin password: ****
+Enter master passphrase (for user DB): ****
+
+Output:
+✓ User database initialized
+  Admin user created
+  Master vault passphrase: AbCd1234EfGh5678IjKl...
+  ⚠️  SAVE THIS PASSPHRASE - needed for vault operations!
+
+# 2. Start API server
+secure-secrets-storage api
+Enter master passphrase: ****
+
+Output:
+🔐 Starting Secure Vault API Server
+   Vault: vault.enc
+   User DB: users.db
+   Listening on: 127.0.0.1:6666
+
+# Custom address
+secure-secrets-storage serve-secure 0.0.0.0:6666
+```
+
+### User Roles
+
+| Role | Read Secrets | Write Secrets | Delete Secrets | Manage Users |
+|------|--------------|---------------|----------------|--------------|
+| **Admin** | ✅ | ✅ | ✅ | ✅ |
+| **ReadWrite** | ✅ | ✅ | ✅ | ❌ |
+| **ReadOnly** | ✅ | ❌ | ❌ | ❌ |
+
+### API Endpoints
+
+#### Authentication
+```bash
+# Login
+curl -X POST http://localhost:6666/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "your_password"}'
+
+Response:
+{
+  "token": "550e8400-e29b-41d4-a716-446655440000",
+  "expires_at": "2025-12-29 15:30:00 UTC",
+  "username": "admin",
+  "role": "Admin"
+}
+
+# Get current user info
+curl -H "Authorization: Bearer <token>" \
+  http://localhost:6666/api/v1/auth/whoami
+
+# Change password
+curl -X POST http://localhost:6666/api/v1/auth/change-password \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "old_password": "current_pass",
+    "new_password": "new_pass"
+  }'
+
+# Logout
+curl -X POST http://localhost:6666/api/v1/auth/logout \
+  -H "Authorization: Bearer <token>"
+```
+
+#### Secret Management
+```bash
+# List all secrets
+curl -H "Authorization: Bearer <token>" \
+  http://localhost:6666/api/v1/secrets
+
+# Get specific secret
+curl -H "Authorization: Bearer <token>" \
+  http://localhost:6666/api/v1/secrets/api_key
+
+# Create/update secret
+curl -X POST http://localhost:6666/api/v1/secrets \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"key": "api_key", "value": "secret123"}'
+
+# Delete secret
+curl -X DELETE http://localhost:6666/api/v1/secrets/api_key \
+  -H "Authorization: Bearer <token>"
+```
+
+#### User Management (Admin Only)
+```bash
+# Create new user
+curl -X POST http://localhost:6666/api/v1/admin/users \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "password": "secure_password",
+    "role": "ReadWrite"
+  }'
+
+# List all users
+curl -H "Authorization: Bearer <token>" \
+  http://localhost:6666/api/v1/admin/users
+
+Response:
+[
+  {
+    "username": "admin",
+    "role": "Admin",
+    "created_at": "2025-12-29 10:00:00 UTC",
+    "last_login": "2025-12-29 14:30:00 UTC",
+    "login_count": 5
+  },
+  {
+    "username": "alice",
+    "role": "ReadWrite",
+    "created_at": "2025-12-29 14:45:00 UTC",
+    "last_login": null,
+    "login_count": 0
+  }
+]
+```
+
+#### Health Check
+```bash
+# No authentication required
+curl http://localhost:6666/health
+
+Response:
+{
+  "status": "healthy",
+  "version": "1.0",
+  "uptime_seconds": 3600
+}
+```
+
+### Security Features
+
+- ✅ **Argon2id password hashing** - GPU-resistant, 64MB memory per hash
+- ✅ **Per-user vault passphrase encryption** - Each user's password encrypts vault access
+- ✅ **Session management** - 30-minute token expiration with auto-refresh
+- ✅ **Account lockout** - 5 failed attempts = 15-minute lock
+- ✅ **Role-based access control** - Granular permissions per user
+- ✅ **Encrypted user database** - Protected by master passphrase
+- ✅ **Audit logging** - All authentication events tracked
+
+### Architecture
+```
+User Login
+    ↓
+Password → Argon2id hash verification
+    ↓
+Decrypt vault passphrase (unique per user)
+    ↓
+Create session token (UUID, 30min expiration)
+    ↓
+All API requests: Authorization: Bearer <token>
+    ↓
+Role-based permission check
+    ↓
+Access vault with decrypted passphrase
+```
+
+### Shared Vault Model
+
+All users share the same vault but authenticate separately:
+- One encrypted vault containing all secrets
+- Each user has the vault passphrase encrypted with their own password
+- Role-based permissions control read/write/delete access
+- Ideal for team secrets: API keys, DB passwords, shared credentials
+
+### Files Created
+```
+vault.enc           # Encrypted secrets (shared by all users)
+vault.counter       # Rollback protection
+vault_audit.log     # Encrypted audit log
+users.db            # Encrypted user database
+```
+
 ## File Structure
 
 ```
@@ -303,9 +489,10 @@ cargo tarpaulin --out Html
 ## Limitations
 
 - **Single vault per directory**: The application uses fixed filenames (`vault.enc`, etc.)
-- **No network sync**: Designed for local storage only
-- **No sharing**: One passphrase = one user (no multi-user access control)
+- **No network sync**: Designed for local storage only (API provides network access)
+- **Shared vault model**: All authenticated users access the same vault (role-controlled)
 - **Performance**: Argon2id is intentionally slow (security vs. convenience trade-off)
+- **Session storage**: Sessions stored in memory only (restart clears all sessions)
 
 ## Troubleshooting
 
@@ -330,6 +517,21 @@ Either:
 Vault files are readable by other users.
 
 **Solution**: Run `check-permissions` command to fix automatically.
+
+### "Maximum concurrent sessions exceeded"
+User has reached the session limit (default: 5 per user).
+
+**Solution**: Logout from unused sessions or wait for sessions to expire (30 minutes).
+
+### "Account locked due to failed login attempts"
+Too many failed login attempts (5+ failures).
+
+**Solution**: Wait 15 minutes for automatic unlock, or contact admin to manually unlock.
+
+### "Invalid or expired session"
+Session token has expired or is invalid.
+
+**Solution**: Login again to get a new session token.
 
 ## Contributing
 

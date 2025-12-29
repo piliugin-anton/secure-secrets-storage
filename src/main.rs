@@ -43,6 +43,9 @@ fn print_usage() {
     println!("  rotate-keys         - Rotate encryption keys (same passphrase)");
     println!("  emergency-rotate    - Emergency key rotation + verify");
     println!("  check-permissions   - Verify and fix file permissions");
+    println!("\n🔐 Multi-User API Server:");
+    println!("  init-users <admin_username>  - Initialize user database");
+    println!("  api [addr]          - Start secure API server (default: 127.0.0.1:6666)");
     println!("\nSecurity features:");
     println!("  - XChaCha20-Poly1305 encryption");
     println!("  - Argon2id key derivation (256MB memory)");
@@ -50,6 +53,7 @@ fn print_usage() {
     println!("  - Rollback attack protection");
     println!("  - Encrypted audit logging");
     println!("  - Memory zeroization");
+    println!("  - Multi-user authentication with role-based access control");
 }
 
 pub fn init_logging() {
