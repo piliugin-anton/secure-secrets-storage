@@ -1,6 +1,7 @@
 use std::env;
 use std::io;
 use rpassword::prompt_password;
+use secure_secrets_storage::api_auth::init_user_database;
 use secure_secrets_storage::vault::AuditOperation;
 use secure_secrets_storage::vault::SecureString;
 use secure_secrets_storage::vault::VaultError;
@@ -340,6 +341,12 @@ fn main() -> secure_secrets_storage::vault::Result<()> {
                 true,
                 &audit_key,
             )?;
+        }
+        "init-users" if args.len() == 3 => {
+            let admin_username = args[2].clone();
+            let admin_password = SecureString::new(prompt_password("Enter admin password: ")?);
+            init_user_database(USER_DB_FILE, &passphrase, admin_username, admin_password.as_str())?;
+            info!("User database initialized successfully.");
         }
         _ => {
             error!("Invalid command or arguments.");
