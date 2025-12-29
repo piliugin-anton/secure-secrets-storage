@@ -1,15 +1,13 @@
-use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, middleware};
-use serde::{Deserialize, Serialize};
-use std::sync::{Arc, RwLock};
-use std::collections::HashMap;
-use std::time::{SystemTime, Duration};
+use actix_governor::{Governor, GovernorConfigBuilder};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, middleware, web};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, SystemTime};
 
-use crate::api_auth::{UserManager, User, UserRole};
-use crate::vault::{
-    load_vault, save_vault, derive_counter_key, 
-    SecureString, VaultError, Result
-};
+use crate::api_auth::{User, UserManager, UserRole};
+use crate::vault::{Result, SecureString, VaultError, derive_counter_key, load_vault, save_vault};
 
 // ============================================================================
 // API Request/Response Models
@@ -93,10 +91,15 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(user: User, vault_passphrase: SecureString, duration: Duration, ip: Option<String>) -> Self {
+    pub fn new(
+        user: User,
+        vault_passphrase: SecureString,
+        duration: Duration,
+        ip: Option<String>,
+    ) -> Self {
         let now = SystemTime::now();
         let session_id = uuid::Uuid::new_v4().to_string();
-        
+
         Session {
             session_id,
             user,
@@ -138,34 +141,46 @@ impl SessionManager {
         }
     }
 
-    pub fn create_session(&self, user: User, vault_passphrase: SecureString, ip: Option<String>) -> Result<Session> {
-        let session = Session::new(user.clone(), vault_passphrase, Duration::from_secs(30 * 60), ip);
+    pub fn create_session(
+        &self,
+        user: User,
+        vault_passphrase: SecureString,
+        ip: Option<String>,
+    ) -> Result<Session> {
+        let session = Session::new(
+            user.clone(),
+            vault_passphrase,
+            Duration::from_secs(30 * 60),
+            ip,
+        );
         let session_id = session.session_id.clone();
-        
+
         let mut sessions = self.sessions.write().unwrap();
-        
+
         // Cleanup expired sessions
         sessions.retain(|_, s| !s.is_expired());
-        
+
         // Check session limit per user
-        let user_sessions: Vec<_> = sessions.values()
+        let user_sessions: Vec<_> = sessions
+            .values()
             .filter(|s| s.user.username == user.username)
             .collect();
-        
+
         if user_sessions.len() >= self.max_sessions_per_user {
-            return Err(VaultError::InvalidDataFormat(
-                format!("Maximum {} concurrent sessions exceeded", self.max_sessions_per_user)
-            ));
+            return Err(VaultError::InvalidDataFormat(format!(
+                "Maximum {} concurrent sessions exceeded",
+                self.max_sessions_per_user
+            )));
         }
-        
+
         sessions.insert(session_id.clone(), session.clone());
-        
+
         Ok(session)
     }
 
     pub fn get_session(&self, token: &str) -> Option<Session> {
         let mut sessions = self.sessions.write().unwrap();
-        
+
         if let Some(session) = sessions.get_mut(token) {
             if session.is_expired() {
                 sessions.remove(token);
@@ -174,7 +189,7 @@ impl SessionManager {
             session.refresh();
             return Some(session.clone());
         }
-        
+
         None
     }
 
@@ -259,17 +274,18 @@ async fn extract_session(
 
     match state.session_manager.get_session(token) {
         Some(session) => Ok(session),
-        None => {
-            Err(HttpResponse::Unauthorized().json(ErrorResponse {
-                success: false,
-                error: "Invalid or expired session".to_string(),
-                details: None,
-            }))
-        }
+        None => Err(HttpResponse::Unauthorized().json(ErrorResponse {
+            success: false,
+            error: "Invalid or expired session".to_string(),
+            details: None,
+        })),
     }
 }
 
-fn require_permission(session: &Session, min_role: UserRole) -> std::result::Result<(), HttpResponse> {
+fn require_permission(
+    session: &Session,
+    min_role: UserRole,
+) -> std::result::Result<(), HttpResponse> {
     if !session.has_permission(min_role) {
         return Err(HttpResponse::Forbidden().json(ErrorResponse {
             success: false,
@@ -305,7 +321,10 @@ async fn login(
     match user_manager.authenticate(&login_req.username, &login_req.password) {
         Ok((user, vault_passphrase)) => {
             // Create session
-            match state.session_manager.create_session(user.clone(), vault_passphrase, ip) {
+            match state
+                .session_manager
+                .create_session(user.clone(), vault_passphrase, ip)
+            {
                 Ok(session) => {
                     let expires_at = DateTime::<Utc>::from(session.expires_at)
                         .format("%Y-%m-%d %H:%M:%S UTC")
@@ -318,29 +337,22 @@ async fn login(
                         role: format!("{:?}", user.role),
                     })
                 }
-                Err(e) => {
-                    HttpResponse::TooManyRequests().json(ErrorResponse {
-                        success: false,
-                        error: "Session creation failed".to_string(),
-                        details: Some(e.to_string()),
-                    })
-                }
+                Err(e) => HttpResponse::TooManyRequests().json(ErrorResponse {
+                    success: false,
+                    error: "Session creation failed".to_string(),
+                    details: Some(e.to_string()),
+                }),
             }
         }
-        Err(_) => {
-            HttpResponse::Unauthorized().json(ErrorResponse {
-                success: false,
-                error: "Authentication failed".to_string(),
-                details: None,
-            })
-        }
+        Err(_) => HttpResponse::Unauthorized().json(ErrorResponse {
+            success: false,
+            error: "Authentication failed".to_string(),
+            details: None,
+        }),
     }
 }
 
-async fn logout(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-) -> HttpResponse {
+async fn logout(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     match extract_session(&req, &state).await {
         Ok(session) => {
             state.session_manager.remove_session(&session.session_id);
@@ -382,7 +394,9 @@ async fn change_password(
     ) {
         Ok(_) => {
             // Invalidate all sessions for this user (force re-login)
-            state.session_manager.remove_user_sessions(&session.user.username);
+            state
+                .session_manager
+                .remove_user_sessions(&session.user.username);
 
             HttpResponse::Ok().json(ApiResponse::<()> {
                 success: true,
@@ -390,20 +404,15 @@ async fn change_password(
                 message: Some("Password changed successfully. Please log in again.".to_string()),
             })
         }
-        Err(e) => {
-            HttpResponse::BadRequest().json(ErrorResponse {
-                success: false,
-                error: "Password change failed".to_string(),
-                details: Some(e.to_string()),
-            })
-        }
+        Err(e) => HttpResponse::BadRequest().json(ErrorResponse {
+            success: false,
+            error: "Password change failed".to_string(),
+            details: Some(e.to_string()),
+        }),
     }
 }
 
-async fn whoami(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-) -> HttpResponse {
+async fn whoami(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     let session = match extract_session(&req, &state).await {
         Ok(s) => s,
         Err(response) => return response,
@@ -469,27 +478,20 @@ async fn create_user(
         role,
         &session.vault_passphrase,
     ) {
-        Ok(_) => {
-            HttpResponse::Ok().json(ApiResponse::<()> {
-                success: true,
-                data: None,
-                message: Some(format!("User '{}' created successfully", user_req.username)),
-            })
-        }
-        Err(e) => {
-            HttpResponse::BadRequest().json(ErrorResponse {
-                success: false,
-                error: "User creation failed".to_string(),
-                details: Some(e.to_string()),
-            })
-        }
+        Ok(_) => HttpResponse::Ok().json(ApiResponse::<()> {
+            success: true,
+            data: None,
+            message: Some(format!("User '{}' created successfully", user_req.username)),
+        }),
+        Err(e) => HttpResponse::BadRequest().json(ErrorResponse {
+            success: false,
+            error: "User creation failed".to_string(),
+            details: Some(e.to_string()),
+        }),
     }
 }
 
-async fn list_users(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-) -> HttpResponse {
+async fn list_users(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     let session = match extract_session(&req, &state).await {
         Ok(s) => s,
         Err(response) => return response,
@@ -512,23 +514,24 @@ async fn list_users(
 
     match user_manager.list_users() {
         Ok(users) => {
-            let user_infos: Vec<UserInfo> = users.iter().map(|u| UserInfo {
-                username: u.username.clone(),
-                role: format!("{:?}", u.role),
-                created_at: format_timestamp(u.created_at),
-                last_login: u.last_login.map(format_timestamp),
-                login_count: u.login_count,
-            }).collect();
+            let user_infos: Vec<UserInfo> = users
+                .iter()
+                .map(|u| UserInfo {
+                    username: u.username.clone(),
+                    role: format!("{:?}", u.role),
+                    created_at: format_timestamp(u.created_at),
+                    last_login: u.last_login.map(format_timestamp),
+                    login_count: u.login_count,
+                })
+                .collect();
 
             HttpResponse::Ok().json(user_infos)
         }
-        Err(e) => {
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
-                error: "Failed to list users".to_string(),
-                details: Some(e.to_string()),
-            })
-        }
+        Err(e) => HttpResponse::InternalServerError().json(ErrorResponse {
+            success: false,
+            error: "Failed to list users".to_string(),
+            details: Some(e.to_string()),
+        }),
     }
 }
 
@@ -536,10 +539,7 @@ async fn list_users(
 // API Handlers - Secrets (Permission-based)
 // ============================================================================
 
-async fn list_secrets(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-) -> HttpResponse {
+async fn list_secrets(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     let session = match extract_session(&req, &state).await {
         Ok(s) => s,
         Err(response) => return response,
@@ -685,10 +685,7 @@ async fn set_secret(
         }
     };
 
-    vault.insert(
-        secret.key.clone(),
-        SecureString::new(secret.value.clone()),
-    );
+    vault.insert(secret.key.clone(), SecureString::new(secret.value.clone()));
 
     match save_vault(
         &state.vault_file,
@@ -697,13 +694,11 @@ async fn set_secret(
         &session.vault_passphrase,
         &counter_key,
     ) {
-        Ok(_) => {
-            HttpResponse::Ok().json(ApiResponse::<()> {
-                success: true,
-                data: None,
-                message: Some(format!("Secret '{}' saved", secret.key)),
-            })
-        }
+        Ok(_) => HttpResponse::Ok().json(ApiResponse::<()> {
+            success: true,
+            data: None,
+            message: Some(format!("Secret '{}' saved", secret.key)),
+        }),
         Err(e) => HttpResponse::InternalServerError().json(ErrorResponse {
             success: false,
             error: "Failed to save vault".to_string(),
@@ -766,13 +761,11 @@ async fn delete_secret(
             &session.vault_passphrase,
             &counter_key,
         ) {
-            Ok(_) => {
-                HttpResponse::Ok().json(ApiResponse::<()> {
-                    success: true,
-                    data: None,
-                    message: Some(format!("Secret '{}' deleted", key)),
-                })
-            }
+            Ok(_) => HttpResponse::Ok().json(ApiResponse::<()> {
+                success: true,
+                data: None,
+                message: Some(format!("Secret '{}' deleted", key)),
+            }),
             Err(e) => HttpResponse::InternalServerError().json(ErrorResponse {
                 success: false,
                 error: "Failed to save vault".to_string(),
@@ -838,9 +831,16 @@ pub async fn run_api_server(
         master_passphrase,
     ));
 
+    let governor_conf = GovernorConfigBuilder::default()
+        .requests_per_second(1) // 10 requests per second
+        .burst_size(2)
+        .finish()
+        .unwrap();
+
     HttpServer::new(move || {
         App::new()
             .app_data(state.clone())
+            .wrap(Governor::new(&governor_conf))
             .wrap(middleware::Logger::default())
             .wrap(middleware::Compress::default())
             // Public endpoints
@@ -859,7 +859,7 @@ pub async fn run_api_server(
                     .route("/secrets/{key}", web::delete().to(delete_secret))
                     // Admin - User Management
                     .route("/admin/users", web::post().to(create_user))
-                    .route("/admin/users", web::get().to(list_users))
+                    .route("/admin/users", web::get().to(list_users)),
             )
     })
     .bind(bind_address)?
