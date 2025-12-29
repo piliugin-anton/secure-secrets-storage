@@ -6,3 +6,4 @@ test_vault_*.enc
 test_counter_*.counter
 test_audit_*.log
 test_backup_*.bak
+users.enc
