@@ -45,7 +45,7 @@ fn print_usage() {
     println!("  check-permissions   - Verify and fix file permissions");
     println!("\n🔐 Multi-User API Server:");
     println!("  init-users <admin_username>  - Initialize user database");
-    println!("  api [addr]          - Start secure API server (default: 127.0.0.1:6666)");
+    println!("  api [addr]                   - Start secure API server (default: 127.0.0.1:6666)");
     println!("\nSecurity features:");
     println!("  - XChaCha20-Poly1305 encryption");
     println!("  - Argon2id key derivation (256MB memory)");
