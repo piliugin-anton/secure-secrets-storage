@@ -327,18 +327,11 @@ async fn login(
                 }
             }
         }
-        Err(VaultError::AuthenticationFailed) => {
+        Err(_) => {
             HttpResponse::Unauthorized().json(ErrorResponse {
                 success: false,
-                error: "Invalid username or password".to_string(),
-                details: None,
-            })
-        }
-        Err(e) => {
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
                 error: "Authentication failed".to_string(),
-                details: Some(e.to_string()),
+                details: None,
             })
         }
     }
