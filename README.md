@@ -258,6 +258,7 @@ secure-secrets-storage add-user charlie
 **Available roles:** `Admin`, `ReadWrite`, `ReadOnly`
 
 # 2. Start API server
+```bash
 secure-secrets-storage api
 Enter passphrase: ****
 
