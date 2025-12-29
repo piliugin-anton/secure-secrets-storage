@@ -144,8 +144,6 @@ fn main() -> secure_secrets_storage::vault::Result<()> {
         .map_err(|e| VaultError::Io(e));
     }
 
-    
-
     // Derive audit key from passphrase
     let audit_key = derive_audit_key(&passphrase)?;
     let counter_key = derive_counter_key(&passphrase)?;
