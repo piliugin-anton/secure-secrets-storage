@@ -248,8 +248,13 @@ Select user role:
 > 3
 ✓ User 'alice' created with role ReadWrite
 ```
+### User Roles
 
-**Available roles:** `Admin`, `ReadWrite`, `ReadOnly`
+| Role | Read Secrets | Write Secrets | Delete Secrets | Manage Users |
+|------|--------------|---------------|----------------|--------------|
+| **Admin** | ✅ | ✅ | ✅ | ✅ |
+| **ReadWrite** | ✅ | ✅ | ✅ | ❌ |
+| **ReadOnly** | ✅ | ❌ | ❌ | ❌ |
 
 # 2. Start API server
 ```bash
@@ -265,14 +270,6 @@ Output:
 # Custom address
 secure-secrets-storage api 0.0.0.0:6666
 ```
-
-### User Roles
-
-| Role | Read Secrets | Write Secrets | Delete Secrets | Manage Users |
-|------|--------------|---------------|----------------|--------------|
-| **Admin** | ✅ | ✅ | ✅ | ✅ |
-| **ReadWrite** | ✅ | ✅ | ✅ | ❌ |
-| **ReadOnly** | ✅ | ❌ | ❌ | ❌ |
 
 ### API Endpoints
 
