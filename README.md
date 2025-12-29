@@ -189,15 +189,15 @@ The vault now supports multi-user access via a secure REST API with role-based p
 ### Initial Setup
 
 # 1. Initialize user database with admin account
-```secure-secrets-storage init-users admin
+secure-secrets-storage init-users admin
 Enter admin password: ****
-Enter passphrase (for user DB): ****```
+Enter passphrase (for user DB): ****
 
 Output:
-```✓ User database initialized
+✓ User database initialized
   Admin user created
   Master vault passphrase: AbCd1234EfGh5678IjKl...
-  ⚠️  SAVE THIS PASSPHRASE - needed for vault operations!```
+  ⚠️  SAVE THIS PASSPHRASE - needed for vault operations!
 
 ### CLI User Management
 
@@ -206,7 +206,7 @@ secure-secrets-storage list-users
 Enter master passphrase: ****
 
 Output:
-```=== Users ===
+=== Users ===
   • admin (Admin)
     ID: 550e8400-e29b-41d4-a716-446655440000
     Created: 2025-12-29 10:00:00 UTC
@@ -223,10 +223,10 @@ Output:
     ID: 9b2d5e8a-3c4f-4a5b-8d6e-1f2a3b4c5d6e
     Created: 2025-12-29 16:00:00 UTC
     Last login: None
-    Login count: 0```
+    Login count: 0
 
 # Add new user via CLI (requires master passphrase and vault passphrase)
-```secure-secrets-storage add-user alice
+secure-secrets-storage add-user alice
 Enter master passphrase: ****
 Enter user password: ****
 Repeat user password: ****
@@ -237,13 +237,11 @@ Select user role:
   2. Read-only
   3. Read + Write
 > 3
-✓ User 'alice' created with role ReadWrite```
+✓ User 'alice' created with role ReadWrite
 
 # Add user with different roles
-```
 secure-secrets-storage add-user bob
 secure-secrets-storage add-user charlie
-```
 
 **Available roles:** `Admin`, `ReadWrite`, `ReadOnly`
 
