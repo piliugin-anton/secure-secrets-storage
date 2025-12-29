@@ -210,7 +210,7 @@ Output:
    Listening on: 127.0.0.1:6666
 
 # Custom address
-secure-secrets-storage serve-secure 0.0.0.0:6666
+secure-secrets-storage api 0.0.0.0:6666
 ```
 
 ### User Roles
