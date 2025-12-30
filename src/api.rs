@@ -832,7 +832,7 @@ pub async fn run_api_server(
     ));
 
     let governor_conf = GovernorConfigBuilder::default()
-        .requests_per_second(1) // 10 requests per second
+        .requests_per_second(2) // 2 requests per second
         .burst_size(2)
         .finish()
         .unwrap();
