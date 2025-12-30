@@ -314,7 +314,7 @@ curl -H "Authorization: Bearer <token>" \
 
 # Get specific secret
 curl -H "Authorization: Bearer <token>" \
-  http://localhost:6666/api/v1/secrets/api_key
+  http://localhost:6666/api/v1/secrets/key
 
 # Create/update secret
 curl -X POST http://localhost:6666/api/v1/secrets \
@@ -323,7 +323,7 @@ curl -X POST http://localhost:6666/api/v1/secrets \
   -d '{"key": "api_key", "value": "secret123"}'
 
 # Delete secret
-curl -X DELETE http://localhost:6666/api/v1/secrets/api_key \
+curl -X DELETE http://localhost:6666/api/v1/secrets/key \
   -H "Authorization: Bearer <token>"
 ```
 
