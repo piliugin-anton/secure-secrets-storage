@@ -375,6 +375,77 @@ Response:
 }
 ```
 
+### API client
+```rust
+#[tokio::main]
+async fn main() -> Result<()> {
+    let client = VaultClient::new("http://localhost:8080")?;
+
+    // Login
+    println!("Logging in...");
+    let response = client.login("admin", "admin_password").await?;
+    println!("✓ Logged in as {} ({})", response.username, response.role);
+    println!("  Token expires: {}", response.expires_at);
+    println!();
+
+    // Set some secrets
+    println!("Setting secrets...");
+    client.set_secret("database_url", "postgresql://localhost/mydb").await?;
+    client.set_secret("api_key", "sk_live_1234567890").await?;
+    client.set_secret("jwt_secret", "my-jwt-secret-key").await?;
+    println!("✓ Secrets saved");
+    println!();
+
+    // List secrets
+    println!("Listing all secrets...");
+    let keys = client.list_secrets().await?;
+    for key in &keys {
+        println!("  - {}", key);
+    }
+    println!();
+
+    // Get specific secret
+    println!("Retrieving secret...");
+    if let Some(value) = client.get_secret("api_key").await? {
+        println!("  api_key = {}", value);
+    }
+    println!();
+
+    // User management (if admin)
+    println!("Creating new user...");
+    match client.create_user("alice", "alice_password", "ReadWrite").await {
+        Ok(_) => println!("✓ User 'alice' created"),
+        Err(e) => println!("✗ Failed to create user: {}", e),
+    }
+    println!();
+
+    // List users
+    println!("Listing all users...");
+    match client.list_users().await {
+        Ok(users) => {
+            for user in users {
+                println!("  - {} ({}) - Login count: {}", user.username, user.role, user.login_count);
+            }
+        }
+        Err(e) => println!("✗ Failed to list users: {}", e),
+    }
+    println!();
+
+    // Delete secret
+    println!("Deleting secret...");
+    client.delete_secret("jwt_secret").await?;
+    println!("✓ Secret deleted");
+    println!();
+
+    // Logout
+    println!("Logging out...");
+    client.logout().await?;
+    println!("✓ Logged out");
+
+    Ok(())
+}
+```
+
 ### Security Features
 
 - ✅ **Argon2id password hashing** - GPU-resistant, 64MB memory per hash

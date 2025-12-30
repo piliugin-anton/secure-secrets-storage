@@ -1,6 +1,7 @@
 pub mod vault;
 pub mod api;
 pub mod api_auth;
+pub mod api_client;
 
 pub const VERSION: u8 = 1;
 pub const VAULT_FILE: &str = "vault.enc";
