@@ -259,7 +259,7 @@ Select user role:
 #### 2. Start API server
 ```bash
 secure-secrets-storage api
-Enter passphrase: ****
+Enter users database passphrase: ****
 
 Output:
 🔐 Starting Secure Vault API Server
