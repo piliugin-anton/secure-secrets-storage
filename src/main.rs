@@ -141,9 +141,9 @@ fn main() -> secure_secrets_storage::vault::Result<()> {
         "init-users" if args.len() == 3 => {
             // Prompt passphrase securely (no echo)
             let master_passphrase =
-                SecureString::new(prompt_password("Enter master passphrase: ")?);
+                SecureString::new(prompt_password("Enter users database passphrase: ")?);
             let master_passphrase_repeat =
-                SecureString::new(prompt_password("Repeat master passphrase: ")?);
+                SecureString::new(prompt_password("Repeat users database passphrase: ")?);
             compare_passphrases(&master_passphrase, &master_passphrase_repeat)?;
             let admin_passphrase = SecureString::new(prompt_password("Enter admin passphrase: ")?);
             let admin_passphrase_repeat =
@@ -162,7 +162,7 @@ fn main() -> secure_secrets_storage::vault::Result<()> {
         "add-user" if args.len() == 3 => {
             // Prompt passphrase securely (no echo)
             let master_passphrase =
-                SecureString::new(prompt_password("Enter master passphrase: ")?);
+                SecureString::new(prompt_password("Enter users database passphrase: ")?);
             let username = args[2].clone();
             let password = SecureString::new(prompt_password("Enter user password: ")?);
             let password_repeat = SecureString::new(prompt_password("Repeat user password: ")?);
@@ -200,14 +200,14 @@ fn main() -> secure_secrets_storage::vault::Result<()> {
         "list-users" => {
             // Prompt passphrase securely (no echo)
             let master_passphrase =
-                SecureString::new(prompt_password("Enter master passphrase: ")?);
+                SecureString::new(prompt_password("Enter users database passphrase: ")?);
 
             return list_users_cli(USER_DB_FILE, &master_passphrase);
         }
         "api" => {
             // Prompt passphrase securely (no echo)
             let master_passphrase =
-                SecureString::new(prompt_password("Enter master passphrase: ")?);
+                SecureString::new(prompt_password("Enter users database passphrase: ")?);
             let bind_address = args.get(2).map(|s| s.as_str()).unwrap_or("127.0.0.1:6666");
 
             return api::run_api_server(

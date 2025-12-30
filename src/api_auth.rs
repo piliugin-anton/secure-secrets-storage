@@ -249,7 +249,7 @@ impl User {
         }
 
         // Decrypt vault passphrase with old password
-        let vault_passphrase = self.decrypt_vault_passphrase(old_password)?;
+        let db_passphrase = self.decrypt_vault_passphrase(old_password)?;
 
         // Generate new password hash
         self.password_hash = Self::hash_password(new_password)?;
@@ -264,8 +264,8 @@ impl User {
         let nonce = XNonce::from_slice(&new_nonce);
 
         self.encrypted_vault_passphrase = cipher
-            .encrypt(nonce, vault_passphrase.as_bytes())
-            .map_err(|_| VaultError::CryptoError("Failed to re-encrypt vault passphrase".into()))?;
+            .encrypt(nonce, db_passphrase.as_bytes())
+            .map_err(|_| VaultError::CryptoError("Failed to re-encrypt database passphrase".into()))?;
 
         self.passphrase_nonce = new_nonce.to_vec();
         self.must_change_password = false;
@@ -363,21 +363,18 @@ impl UserManager {
     }
 
     /// Initialize user database with first admin user
-    pub fn initialize(&self, admin_username: String, admin_password: &str) -> Result<()> {
+    pub fn initialize(&self, admin_username: String, admin_password: &str, db_passphrase: &SecureString) -> Result<()> {
         if Path::new(&self.db_file).exists() {
             return Err(VaultError::InvalidDataFormat(
                 "User database already initialized".into()
             ));
         }
 
-        // Create master vault passphrase (shared by all users)
-        let vault_passphrase = Self::generate_secure_passphrase();
-
         // Create admin user
         let admin = User::new(
             admin_username,
             admin_password,
-            &vault_passphrase,
+            &db_passphrase,
             UserRole::Admin,
         )?;
 
@@ -388,14 +385,12 @@ impl UserManager {
 
         println!("✓ User database initialized");
         println!("  Admin user created");
-        println!("  Master vault passphrase: {}", vault_passphrase.as_str());
-        println!("  ⚠️  SAVE THIS PASSPHRASE - needed for vault operations!");
 
         Ok(())
     }
 
     /// Generate cryptographically secure random passphrase
-    fn generate_secure_passphrase() -> SecureString {
+    /* fn generate_secure_passphrase() -> SecureString {
         use rand::Rng;
         const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
         let mut rng = rand::thread_rng();
@@ -408,7 +403,7 @@ impl UserManager {
             .collect();
 
         SecureString::new(passphrase)
-    }
+    } */
 
     /// Load and decrypt user database
     fn load_database(&self) -> Result<UserDatabase> {
@@ -550,7 +545,7 @@ impl UserManager {
         }
 
         // Decrypt vault passphrase
-        let vault_passphrase = user.decrypt_vault_passphrase(password)?;
+        let db_passphrase = user.decrypt_vault_passphrase(password)?;
 
         // Record successful login
         user.record_successful_login();
@@ -558,7 +553,7 @@ impl UserManager {
         let user_clone = user.clone();
         self.save_database(&db)?;
 
-        Ok((user_clone, vault_passphrase))
+        Ok((user_clone, db_passphrase))
     }
 
     /// Add new user (admin only)
@@ -642,7 +637,7 @@ pub fn init_user_database(
     admin_password: &str,
 ) -> Result<()> {
     let manager = UserManager::new(db_file.to_string(), master_passphrase)?;
-    manager.initialize(admin_username, admin_password)?;
+    manager.initialize(admin_username, admin_password, master_passphrase)?;
     Ok(())
 }
 
@@ -698,7 +693,7 @@ fn format_timestamp(timestamp: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+mod api_auth_tests {
     use super::*;
     use tempfile::tempdir;
 
@@ -795,11 +790,12 @@ mod tests {
         
         let master_pass = SecureString::new("master_passphrase_secure".to_string());
         let manager = UserManager::new(db_file.clone(), &master_pass).unwrap();
+        let vault_pass = SecureString::new("vault_pass".to_string());
 
-        manager.initialize("admin".to_string(), "admin_password").unwrap();
+        manager.initialize("admin".to_string(), "admin_password", &vault_pass).unwrap();
 
         // Should not be able to initialize twice
-        assert!(manager.initialize("admin2".to_string(), "pass").is_err());
+        assert!(manager.initialize("admin2".to_string(), "pass", &vault_pass).is_err());
     }
 
     #[test]
@@ -809,8 +805,9 @@ mod tests {
         
         let master_pass = SecureString::new("master".to_string());
         let mut manager = UserManager::new(db_file.clone(), &master_pass).unwrap();
+        let vault_pass = SecureString::new("vault_pass".to_string());
 
-        manager.initialize("admin".to_string(), "adminpass").unwrap();
+        manager.initialize("admin".to_string(), "adminpass", &vault_pass).unwrap();
 
         // Authenticate with correct credentials
         let result = manager.authenticate("admin", "adminpass");
